@@ -105,7 +105,7 @@ def generate_scene_description(transcript, events, image_captions):
 Speech: "{transcript}"
 Sounds detected: {', '.join(events)}
 Visuals: {', '.join(image_captions)}
-With all the context including all language, describe what is happening in the scene in Japanese."""
+With all the context message, describe what is happening in the scene in Japanese."""
     response = client.chat.completions.create(
         model="gpt-4.1-nano",
         messages=[{"role": "user", "content": prompt}],

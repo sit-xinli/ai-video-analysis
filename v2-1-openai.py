@@ -155,13 +155,9 @@ def caption_image(img, speech, evts):
         )
     return response.choices[0].message.content
 
-# Combine all into GPT prompt
-def generate_scene_description(transcript, events, image_captions):
-    prompt = f"""You are an AI assistant describing scenes from video to a disabled person with wheelchair, and then concisely advice the next action to avoid risk.
-Speech: "{transcript}"
-Sounds detected: {', '.join(events)}
-Visuals: {', '.join(image_captions)}
-With all the context including all language, describe what is happening in the scene in Japanese."""
+# generate scene description using GPT
+def generate_scene_description(prompt):
+    
     response = client.chat.completions.create(
         model="gpt-4.1-nano",
         messages=[{"role": "user", "content": prompt}],
@@ -191,17 +187,25 @@ def analyze_video(video_path):
             caption = caption_image(frames[i], transcript, events) # Caption image using BLIP--will be change to CHATGPT
         else:
             caption = "No frame available"
-        scene = generate_scene_description(transcript, events, [caption])
-        results.append((i, transcript, events, caption, scene))
+        #scene = generate_scene_description(transcript, events, [caption])
+        results.append((i, transcript, events, caption))
     return results
 
 #results = analyze_video("2025-05-05 220122.mp4")
 results = analyze_video("2025-05-27-180908.mp4")
 
-for i, transcript, events, caption, scene in results:
-    print(f"--- Segment {i} ---")
-    print(f"Transcript: {transcript}")
-    print(f"Audio Events: {events}")
-    print(f"Visual Caption: {caption}")
-    print(f"Scene Description: {scene}")
-    
+prompt = """
+You are an AI assistant describing scenes from video to a disabled person with wheelchair.
+With all the context including in these consecutive SEGEMENTs, firstly describe what is happening in the scene.
+Then concisely advice the next action to avoid risk for the disabled person in Japanese.
+"""
+# Combine all into GPT prompt
+for i, transcript, events, caption in results:
+    prompt = f"""{prompt} 
+    --- Segment {i} ---
+    Speech detected: "{transcript}"
+    Sounds detected: {', '.join(events)}
+    Visual description: {caption} """
+print(prompt)
+response = generate_scene_description(prompt)
+print(f"\n\nScene Description: {response}")

@@ -1,0 +1,45 @@
+uv run v2-1-openai.py 
+/mnt/hdd-p2/ai-video-analysis/.venv/lib/python3.12/site-packages/webrtcvad.py:1: UserWarning: pkg_resources is deprecated as an API. See https://setuptools.pypa.io/en/latest/pkg_resources.html. The pkg_resources package is slated for removal as early as 2025-11-30. Refrain from using this package or pin to Setuptools<81.
+  import pkg_resources
+Using a slow image processor as `use_fast` is unset and a slow processor was saved with this model. `use_fast=True` will be the default behavior in v4.52, even if the model was saved with a slow processor. This will result in minor differences in outputs. You'll still be able to use a slow processor with `use_fast=False`.
+Using a slow image processor as `use_fast` is unset and a slow processor was saved with this model. `use_fast=True` will be the default behavior in v4.52, even if the model was saved with a slow processor. This will result in minor differences in outputs. You'll still be able to use a slow processor with `use_fast=False`.
+Analyzing video: 2025-05-27-180908.mp4
+Processing segment 1/6...
+Processing segment 2/6...
+Processing segment 3/6...
+Processing segment 4/6...
+Processing segment 5/6...
+Processing segment 6/6...
+
+You are an AI assistant describing scenes from video to a disabled person with wheelchair.
+With all the context including in these consecutive SEGEMENTs, firstly describe what is happening in the scene in Japanese.
+Then concisely advice the next action to avoid risk for the disabled person.
+ 
+    --- Segment 0 ---
+    Speech detected: "These obstacles with your wheelchair can jolt and potentially knock you out of your wheelchair. When you approach these obstacles, such as a speed bump, search for an alternate route."
+    Sounds detected: Speech, Music, Spray, Speech synthesizer, Female speech, woman speaking
+    Visual description: The image shows a man in a wheelchair on a sidewalk next to greenery and a coiled garden hose on the ground. A voiceover provides safety guidance about wheelchair obstacles, specifically mentioning that obstacles like speed bumps can cause jolts or dislodge the wheelchair, and advises searching for alternative routes when approaching such obstacles. Additionally, sounds detected include speech, music, spray, speech synthesizer, and a woman speaking.  
+    --- Segment 1 ---
+    Speech detected: "Since alternate routes may not always be available, it's important to know how to manage these obstacles. Begin navigating raised obstacles with a spotter, as"
+    Sounds detected: Speech, Music, Female speech, woman speaking, Spray, Zipper (clothing)
+    Visual description: The image shows a person in a wheelchair traveling along a paved pathway in a park lined with green trees and foliage. The pathway has some raised obstacles or uneven areas, which are being managed with the assistance of a spotter. The sunlight filters through the trees, creating a bright and inviting environment. The scene highlights the importance of accessible navigation and obstacle management for individuals using wheelchairs in outdoor settings.  
+    --- Segment 2 ---
+    Speech detected: "Start with a basic scenario, such as crossing over a garden hose. As you near the hose, perform a pop up to lift your front wheels up and over the hose. After you master"
+    Sounds detected: Music, Speech, Spray, Zipper (clothing), Hiss
+    Visual description: The image shows a person in a wheelchair being assisted by another individual on a sidewalk. They appear to be outdoors near green bushes and a brick building. There is a garden hose on the ground, which they might be practicing to cross over by performing a pop-up to lift the front wheels. The scene is bright and sunny, indicating daytime.  
+    --- Segment 3 ---
+    Speech detected: "a small raised obstacle. Advance to more challenging obstacles, such as rutted paths. As you approach a bump, you may need to balance in a full wheelie to clear it."
+    Sounds detected: Speech, Music, Spray, Snake, Narration, monologue
+    Visual description: The image shows a man in a wheelchair on a paved path, near some lush green bushes and a garden hose coiled on the ground. The setting appears to be outdoors, possibly in a garden or park area. The person looks focused and appears to be preparing or considering navigating the surroundings.  
+    --- Segment 4 ---
+    Speech detected: "Once your back wheels strike the obstacle, gently lean forward and push your wheelchair up and over the bump. Leaning forward lends momentum to the maneuver."
+    Sounds detected: Music, Speech, Spray, Narration, monologue, Television
+    Visual description: The image shows a person in a wheelchair on a paved pathway, approaching or crossing a small bump or obstacle with the guidance of an instructional speech about maneuvering over such obstacles. The surrounding area includes greenery and a building in the background. The scene emphasizes the importance of leaning forward when encountering a bump to assist in smoothly overcoming it with a wheelchair. The sounds detected include music, speech, spray, narration, monologue, and television.  
+    --- Segment 5 ---
+    Speech detected: "and keeps your wheelchair from tipping."
+    Sounds detected: Speech, Music, Television, Male speech, man speaking, Sound effect
+    Visual description: The image depicts a man in a wheelchair navigating a grassy area on a university or college campus, with a pathway and large historic building in the background. Surrounding him are a few other people walking or standing on the grass. The weather appears to be clear and sunny, with lush green trees and well-maintained grounds. The caption suggests a focus on accessibility features within the wheelchair or environment to prevent tipping. 
+Scene Description: このシーンでは、車椅子を使っている人がさまざまな障害物を安全に越える方法について説明しています。最初に、速度バンプのような障害物に近づくときは、衝撃で車椅子から落ちる危険があるため、代わりのルートを探すことを勧めています。次に、障害物を管理するために補助者と協力することや、小さな障害物（例：ホース）を越える練習方法についても触れています。大きな段差や凹凸のある道では、バランスを取りながら車輪を持ち上げる方法や、前に体を傾けて勢いをつけて越えることが重要です。最後に、障害物を越えた後、車椅子が倒れないように注意することも述べられています。
+
+次の行動のアドバイス：  
+安全のために、障害物に近づく前に周囲をよく確認し、可能であれば代替ルートを選びましょう。どうしても越えなければならない場合は、補助者の助けを借りて慎重に進み、越えるときは前に体を傾けて勢いをつけ、安定を保つよう心がけてください。
