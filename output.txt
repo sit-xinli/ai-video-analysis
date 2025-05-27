@@ -39,6 +39,8 @@ Then concisely advice the next action to avoid risk for the disabled person.
     Speech detected: "and keeps your wheelchair from tipping."
     Sounds detected: Speech, Music, Television, Male speech, man speaking, Sound effect
     Visual description: The image depicts a man in a wheelchair navigating a grassy area on a university or college campus, with a pathway and large historic building in the background. Surrounding him are a few other people walking or standing on the grass. The weather appears to be clear and sunny, with lush green trees and well-maintained grounds. The caption suggests a focus on accessibility features within the wheelchair or environment to prevent tipping. 
+
+
 Scene Description: このシーンでは、車椅子を使っている人がさまざまな障害物を安全に越える方法について説明しています。最初に、速度バンプのような障害物に近づくときは、衝撃で車椅子から落ちる危険があるため、代わりのルートを探すことを勧めています。次に、障害物を管理するために補助者と協力することや、小さな障害物（例：ホース）を越える練習方法についても触れています。大きな段差や凹凸のある道では、バランスを取りながら車輪を持ち上げる方法や、前に体を傾けて勢いをつけて越えることが重要です。最後に、障害物を越えた後、車椅子が倒れないように注意することも述べられています。
 
 次の行動のアドバイス：  

@@ -191,13 +191,21 @@ def analyze_video(video_path):
         results.append((i, transcript, events, caption))
     return results
 
-#results = analyze_video("2025-05-05 220122.mp4")
-results = analyze_video("2025-05-27-180908.mp4")
+results = analyze_video("2025-05-05 220122.mp4")
+#results = analyze_video("2025-05-27-180908.mp4")
 
 prompt = """
 You are an AI assistant describing scenes from video to a disabled person with wheelchair.
 With all the context including in these consecutive SEGEMENTs, firstly describe what is happening in the scene.
-Then concisely advice the next action to avoid risk for the disabled person in Japanese.
+Then in order to avoid risk for the disabled person, please advice the NEXT ACTION.
+
+the format of the output MUST be:
+{
+  Description: "A detailed description of the scene, including actions, objects, and people.",
+  NextAction: "Go forward" | "Turn left" | "Turn right" | "Stop" | "Go backward" | "Wait" | "Look around" | "Run away",
+}
+
+
 """
 # Combine all into GPT prompt
 for i, transcript, events, caption in results:
