@@ -1,7 +1,7 @@
 import os
 import cv2
 import torch
-import openai
+from openai import OpenAI
 import torchaudio
 import numpy as np
 from pydub import AudioSegment
@@ -9,8 +9,11 @@ from transformers import BlipProcessor, BlipForConditionalGeneration
 from torchvision import transforms
 from PIL import Image
 import tempfile
-#import moviepy.editor as mp
 from moviepy import VideoFileClip
+from transformers import (
+    BlipProcessor, BlipForConditionalGeneration,
+    AutoProcessor, AutoModelForAudioClassification
+)
 import os
 import dotenv
 
@@ -18,26 +21,24 @@ import dotenv
 dotenv.load_dotenv(override=True)
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL")
+if OPENAI_API_KEY is None or OPENAI_BASE_URL is None:
+    raise ValueError("Please set the OPENAI_API_KEY and OPENAI_URL environment variables.")
+client = OpenAI(api_key=OPENAI_API_KEY, base_url=OPENAI_BASE_URL)
+
+# Load Hugging Face audio classifier
+audio_processor = AutoProcessor.from_pretrained("MIT/ast-finetuned-audioset-10-10-0.4593")
+audio_model = AutoModelForAudioClassification.from_pretrained("MIT/ast-finetuned-audioset-10-10-0.4593")
+audio_model.eval()
 
 # Load BLIP for image captioning
 blip_processor = BlipProcessor.from_pretrained("Salesforce/blip-image-captioning-base")
 blip_model = BlipForConditionalGeneration.from_pretrained("Salesforce/blip-image-captioning-base")
 
-# Load PANNs
-@torch.no_grad()
-def load_panns_model():
-    model = torch.hub.load('qiuqiangkong/panns_demo', 'Cnn14', pretrained=True)
-    model.eval()
-    labels = torch.hub.load('qiuqiangkong/panns_demo', 'get_labels')
-    return model, labels
-
-panns_model, panns_labels = load_panns_model()
-
 # Helper: extract audio from video
 def extract_audio(video_path):
     video = VideoFileClip(video_path)
     audio_path = tempfile.NamedTemporaryFile(suffix=".mp3", delete=False).name
-    video.audio.write_audiofile(audio_path, verbose=False, logger=None)
+    video.audio.write_audiofile(audio_path, logger=None)
     return audio_path
 
 # Segment audio
@@ -49,24 +50,32 @@ def segment_audio(audio_path, chunk_length_ms=10000):
 def transcribe_chunk(audio_chunk):
     with tempfile.NamedTemporaryFile(suffix=".mp3", delete=True) as tmp:
         audio_chunk.export(tmp.name, format="mp3")
-        with open(tmp.name, "rb") as f:
-            transcript = openai.Audio.transcribe("whisper-1", f)
-        return transcript['text']
+        with open(tmp.name, "rb") as audio_file:
+            transcript =client.audio.transcriptions.create(
+                model="gpt-4o-mini-transcribe", 
+                file=audio_file,
+                response_format="json",
+                #language="ja"
+            )
+        print(transcript)
+        return transcript.text
 
-# Detect audio events
+# --- Audio Event Detection via Hugging Face AST ---
 def detect_events(audio_chunk, top_k=3):
     with tempfile.NamedTemporaryFile(suffix=".wav", delete=True) as tmp:
         audio_chunk.export(tmp.name, format="wav")
         waveform, sr = torchaudio.load(tmp.name)
         if waveform.shape[0] > 1:
             waveform = waveform.mean(dim=0, keepdim=True)
-        resampler = torchaudio.transforms.Resample(sr, 32000)
+        resampler = torchaudio.transforms.Resample(sr, 16000)
         waveform = resampler(waveform)
-    input_tensor = waveform.unsqueeze(0)
-    output = panns_model(input_tensor)
-    scores = torch.sigmoid(output['clipwise_output'])[0].cpu().numpy()
-    top_indices = np.argsort(scores)[-top_k:][::-1]
-    return [panns_labels[i] for i in top_indices if scores[i] > 0.2]
+    inputs = audio_processor(waveform.squeeze(), sampling_rate=16000, return_tensors="pt")
+    with torch.no_grad():
+        logits = audio_model(**inputs).logits
+    probs = torch.nn.functional.softmax(logits, dim=-1)[0]
+    top_indices = torch.topk(probs, top_k).indices
+    labels = [audio_model.config.id2label[i.item()] for i in top_indices]
+    return labels
 
 # Extract frames from video
 def extract_key_frames(video_path, interval_s=10):
@@ -96,8 +105,8 @@ def generate_scene_description(transcript, events, image_captions):
 Speech: "{transcript}"
 Sounds detected: {', '.join(events)}
 Visuals: {', '.join(image_captions)}
-Describe what is happening in the scene."""
-    response = openai.ChatCompletion.create(
+With all the context including all language, describe what is happening in the scene in Japanese."""
+    response = client.chat.completions.create(
         model="gpt-4.1-nano",
         messages=[{"role": "user", "content": prompt}],
         temperature=0.7,
@@ -107,9 +116,16 @@ Describe what is happening in the scene."""
 
 # Full video analysis pipeline
 def analyze_video(video_path):
+    interval_s = 3  # Segment length in seconds
+    if not os.path.exists(video_path):
+        raise FileNotFoundError(f"Video file {video_path} does not exist.")
+    print(f"Analyzing video: {video_path}")
+    if not video_path.lower().endswith(('.mp4', '.avi', '.mov')):
+        raise ValueError("Unsupported video format. Please provide a valid video file.")
+
     audio_path = extract_audio(video_path)
-    audio_chunks = segment_audio(audio_path)
-    frames = extract_key_frames(video_path, interval_s=10)
+    audio_chunks = segment_audio(audio_path, chunk_length_ms=interval_s * 1000)
+    frames = extract_key_frames(video_path, interval_s)
     results = []
     for i, chunk in enumerate(audio_chunks):
         print(f"Processing segment {i+1}/{len(audio_chunks)}...")
@@ -123,7 +139,6 @@ def analyze_video(video_path):
         results.append((i, transcript, events, caption, scene))
     return results
 
-
 results = analyze_video("04-22-141130.mp4")
 
 for i, transcript, events, caption, scene in results:
@@ -132,4 +147,3 @@ for i, transcript, events, caption, scene in results:
     print(f"Audio Events: {events}")
     print(f"Visual Caption: {caption}")
     print(f"Scene Description: {scene}")
-    print()
