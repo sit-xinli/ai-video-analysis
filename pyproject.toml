@@ -16,4 +16,5 @@ dependencies = [
     "torchaudio>=2.7.0",
     "torchvision>=0.22.0",
     "transformers>=4.52.3",
+    "webrtcvad>=2.0.10",
 ]

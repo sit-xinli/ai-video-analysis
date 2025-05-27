@@ -5,7 +5,6 @@ from openai import OpenAI
 import torchaudio
 import numpy as np
 from pydub import AudioSegment
-from transformers import BlipProcessor, BlipForConditionalGeneration
 from torchvision import transforms
 from PIL import Image
 import tempfile
@@ -14,8 +13,11 @@ from transformers import (
     BlipProcessor, BlipForConditionalGeneration,
     AutoProcessor, AutoModelForAudioClassification
 )
+import webrtcvad
+import wave
 import os
 import dotenv
+import base64
 
 # Load environment variables from .env file
 dotenv.load_dotenv(override=True)
@@ -46,22 +48,50 @@ def segment_audio(audio_path, chunk_length_ms=10000):
     audio = AudioSegment.from_file(audio_path)
     return [audio[i:i + chunk_length_ms] for i in range(0, len(audio), chunk_length_ms)]
 
+def has_speech(mp3_path, aggressiveness=2, min_speech_frames=5):
+    vad = webrtcvad.Vad(aggressiveness)
+
+    # Load and convert MP3 to 16kHz mono PCM WAV
+    audio = AudioSegment.from_file(mp3_path).set_frame_rate(16000).set_channels(1)
+    pcm_audio = audio.raw_data
+    sample_rate = 16000
+    frame_duration = 30  # ms
+    frame_size = int(sample_rate * frame_duration / 1000) * 2  # 2 bytes per sample (16-bit audio)
+
+    speech_frames = 0
+    num_frames = len(pcm_audio) // frame_size
+
+    for i in range(num_frames):
+        start = i * frame_size
+        end = start + frame_size
+        frame = pcm_audio[start:end]
+        if len(frame) < frame_size:
+            break
+        if vad.is_speech(frame, sample_rate):
+            speech_frames += 1
+        if speech_frames >= min_speech_frames:
+            return True
+    return False
+
 # Transcribe speech
-def transcribe_chunk(audio_chunk):
+def transcribe_chunk(audio_chunk):    
     with tempfile.NamedTemporaryFile(suffix=".mp3", delete=True) as tmp:
         audio_chunk.export(tmp.name, format="mp3")
-        with open(tmp.name, "rb") as audio_file:
-            transcript =client.audio.transcriptions.create(
-                model="gpt-4o-mini-transcribe", 
-                file=audio_file,
-                response_format="json",
-                #language="ja"
-            )
-        print(transcript)
-        return transcript.text
+        if has_speech(tmp.name):
+            with open(tmp.name, "rb") as audio_file:
+                    transcript =client.audio.transcriptions.create(
+                        model="gpt-4o-mini-transcribe", 
+                        file=audio_file,
+                        response_format="json",
+                        #language="ja"
+                    )
+                    return transcript.text
+        else:
+            print("No speech detected in this audio chunk.")
+            return ""            
 
 # --- Audio Event Detection via Hugging Face AST ---
-def detect_events(audio_chunk, top_k=3):
+def detect_events(audio_chunk, top_k=5):
     with tempfile.NamedTemporaryFile(suffix=".wav", delete=True) as tmp:
         audio_chunk.export(tmp.name, format="wav")
         waveform, sr = torchaudio.load(tmp.name)
@@ -87,21 +117,47 @@ def extract_key_frames(video_path, interval_s=10):
     while success:
         if int(frame_count % (fps * interval_s)) == 0:
             img = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            frames.append(Image.fromarray(img))
+            width, height = img.shape[1], img.shape[0]
+            # if width or height is larger than 800, then resize
+            if width > height and width > 800:
+                scale = 800 / width
+                img = cv2.resize(img, (800, int(height * scale)))
+            elif height > width and height > 800:
+                scale = 800 / height
+                img = cv2.resize(img, (int(width * scale), 800))
+            # Convert the frame to JPEG
+            _, buffer = cv2.imencode('.jpg', frame)
+            # Convert to base64
+            base64_frame = base64.b64encode(buffer).decode('utf-8')
+            frames.append(base64_frame)
         success, frame = cap.read()
         frame_count += 1
     cap.release()
     return frames
 
-# Caption images
-def caption_image(img):
-    inputs = blip_processor(images=img, return_tensors="pt")
-    out = blip_model.generate(**inputs)
-    return blip_processor.decode(out[0], skip_special_tokens=True)
+# Caption images: TBD -- use CHATGPT for image captioning
+def caption_image(img, speech, evts):
+    content = [ {"type": "text", "text": f"Speech: {speech}.\n\nSounds detected: {', '.join(evts)} " } ]
+    content.append({
+                "type": "image_url",
+                "image_url": {
+                    "url": f"data:image/jpeg;base64,{img}"
+                }
+            })
+    
+    response = client.chat.completions.create(
+            model="gpt-4.1-nano",
+            messages=[
+                {"role": "system", "content": "You is analysing the images. please give captions to the image paying attention to both images and text."},
+                {"role": "user", "content": content}
+            ],
+            max_tokens=300
+        )
+    return response.choices[0].message.content
 
 # Combine all into GPT prompt
 def generate_scene_description(transcript, events, image_captions):
-    prompt = f"""You are an AI assistant describing scenes from video.
+    prompt = f"""You are an AI assistant describing scenes from video to a disabled person with wheelchair, and then concisely advice the next action to avoid risk.
 Speech: "{transcript}"
 Sounds detected: {', '.join(events)}
 Visuals: {', '.join(image_captions)}
@@ -110,13 +166,13 @@ With all the context including all language, describe what is happening in the s
         model="gpt-4.1-nano",
         messages=[{"role": "user", "content": prompt}],
         temperature=0.7,
-        max_tokens=150
+        max_tokens=1000
     )
     return response.choices[0].message.content.strip()
 
 # Full video analysis pipeline
 def analyze_video(video_path):
-    interval_s = 3  # Segment length in seconds
+    interval_s = 10  # Segment length in seconds
     if not os.path.exists(video_path):
         raise FileNotFoundError(f"Video file {video_path} does not exist.")
     print(f"Analyzing video: {video_path}")
@@ -129,17 +185,17 @@ def analyze_video(video_path):
     results = []
     for i, chunk in enumerate(audio_chunks):
         print(f"Processing segment {i+1}/{len(audio_chunks)}...")
-        transcript = transcribe_chunk(chunk)
-        events = detect_events(chunk)
+        transcript = transcribe_chunk(chunk) # Transcribe audio chunk use CHATGPT
+        events = detect_events(chunk) # Detect audio events use Hugging Face AST
         if i < len(frames):
-            caption = caption_image(frames[i])
+            caption = caption_image(frames[i], transcript, events) # Caption image using BLIP--will be change to CHATGPT
         else:
             caption = "No frame available"
         scene = generate_scene_description(transcript, events, [caption])
         results.append((i, transcript, events, caption, scene))
     return results
 
-results = analyze_video("04-22-141130.mp4")
+results = analyze_video("2025-05-05 220122.mp4")
 
 for i, transcript, events, caption, scene in results:
     print(f"--- Segment {i} ---")
@@ -147,3 +203,4 @@ for i, transcript, events, caption, scene in results:
     print(f"Audio Events: {events}")
     print(f"Visual Caption: {caption}")
     print(f"Scene Description: {scene}")
+    
