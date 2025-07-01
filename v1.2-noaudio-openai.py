@@ -208,6 +208,7 @@ def analyze_video(video_path):
             results.append((i, transcript, events, caption, scene))
     return results
 
+# Example usage
 results = analyze_video("856424-hd_1920_1080_30fps.mp4")
 
 for i, transcript, events, caption, scene in results:

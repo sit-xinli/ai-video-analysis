@@ -187,7 +187,7 @@ def analyze_video(video_path):
         print(f"Processing segment {i+1}/{len(audio_chunks)}...")
         transcript = transcribe_chunk(chunk) # Transcribe audio chunk use CHATGPT
         events = detect_events(chunk) # Detect audio events use Hugging Face AST
-        if i < len(frames):
+        if i < len(frames): # Ensure we have a frame for this segment
             caption = caption_image(frames[i], transcript, events) # Caption image using BLIP--will be change to CHATGPT
         else:
             caption = "No frame available"

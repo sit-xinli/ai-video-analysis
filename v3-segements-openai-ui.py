@@ -36,8 +36,21 @@ audio_model = AutoModelForAudioClassification.from_pretrained("suhacan/ast-finet
 #audio_processor = AutoProcessor.from_pretrained("C0untFloyd/panns-cnn14", token=HF_TOKEN)
 audio_model.eval()
 
+def profile_video(video_path):
+    cap = cv2.VideoCapture(video_path)
+    if not cap.isOpened():
+        raise ValueError(f"Cannot open video file {video_path}")
+    frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    fps = cap.get(cv2.CAP_PROP_FPS)
+    duration = frame_count / fps if fps > 0 else 0
+    cap.release()
+    print(f"Frame count: {frame_count}, FPS: {fps}, Duration: {duration:.2f} seconds")
+
+    return (frame_count, duration)
+
 # Helper: extract audio from video
 def extract_audio(video_path):
+    
     video = VideoFileClip(video_path)
     audio_path = tempfile.NamedTemporaryFile(suffix=".mp3", delete=False).name
     video.audio.write_audiofile(audio_path, logger=None)
@@ -138,9 +151,11 @@ def extract_key_frames(video_path, num_of_frames=10, start_time=0, end_time=None
         raise ValueError("End time must be greater than start time.")
     
     success, frame = cap.read()
+    # Use round() for 四捨五入 (rounding to nearest integer)
+    interval = round((end_frame - start_frame) / num_of_frames + 0.5) if end_frame > start_frame else 1
     frame_count = start_frame
     while success and frame_count < end_frame:
-        if (frame_count - start_frame) % num_of_frames == 0:
+        if (frame_count - start_frame) % interval == 0:
             img = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             width, height = img.shape[1], img.shape[0]
             # if width or height is larger than 800, then resize
@@ -176,7 +191,10 @@ def caption_image(frames, speech, evts):
     response = client.chat.completions.create(
             model="gpt-4.1-nano",
             messages=[
-                {"role": "system", "content": "You is analysing the images. please give captions to the image paying attention to both images and text."},
+                {"role": "system", 
+                 "content": """You is analysizing the visual message with images. 
+                 please give captions to the visual message paying attention to both images and text."""
+                },
                 {"role": "user", "content": content}
             ],
             max_tokens=300
@@ -197,8 +215,13 @@ def generate_scene_description(prompt):
 
 # Full video analysis pipeline
 def analyze_video(video_path):
-    interval_s = 3  # Segment length in seconds
-    num_of_frames = 10  # Number of frames to extract per segment
+    
+    # Profile the video to get frame count and duration
+    _, duration = profile_video(video_path)
+
+    #for segmenting video, we will use 3 seconds as the segment length
+    interval_s = round(duration /5 + 0.5) if duration > 5 else 1  # Segment length in seconds
+    num_of_frames = 6  # Number of frames to extract per segment
 
     if not os.path.exists(video_path):
         raise FileNotFoundError(f"Video file {video_path} does not exist.")
@@ -214,17 +237,22 @@ def analyze_video(video_path):
         print(f"Processing segment {i+1}/{len(audio_chunks)}...")
         transcript = transcribe_chunk(chunk) # Transcribe audio chunk use CHATGPT
         events = detect_events(chunk) # Detect audio events use Hugging Face AST
-        frames = extract_key_frames(video_path, num_of_frames=num_of_frames, start_time=i * interval_s, end_time=(i + 1) * interval_s)
-        if i < len(frames):
-            caption = caption_image(frames, transcript, events) # Caption image using BLIP--will be change to CHATGPT
+        frames = extract_key_frames(video_path, 
+                                    num_of_frames=num_of_frames, 
+                                    start_time=i * interval_s, 
+                                    end_time=(i + 1) * interval_s
+                                )
+        if len(frames) > 0: # Ensure we have a frame for this segment
+            caption = caption_image(frames, transcript, events) # Caption image using CHATGPT
         else:
-            caption = "No frame available"
+            caption = "No visual message available"
         
         results.append((i, transcript, events, caption))
     return results
 
-#results = analyze_video("2025-05-05 220122.mp4")
-results = analyze_video("2025-05-27-180908.mp4")
+
+results = analyze_video("2025-05-05 220122.mp4")
+#results = analyze_video("2025-05-27-180908.mp4")
 
 prompt = """
 You are an AI assistant describing scenes from video to a disabled person with wheelchair.
@@ -239,14 +267,20 @@ the format of the output MUST be:
 
 """
 
-
 # Combine all into GPT prompt
 for i, transcript, events, caption in results:
     prompt = f"""{prompt} 
     --- SEGEMENT {i} ---
-    Detected Speech: "{transcript}"
-    Detected seemingly Sounds : {', '.join(events)}
-    Visual description: {caption} """
+    >>>Detected Speech:\n"{transcript}"
+    >>>Detected seemingly Sounds:\n{', '.join(events)}
+    >>>Visual description:\n{caption} """
 print(prompt)
+
 response = generate_scene_description(prompt)
 print(f"\n\nScene Description: {response}")
+
+## TBD(add ui):
+# 1. add ui to input prompt for task 
+# 2. add ui to input video file or camera input
+# 3. add ui to display segmented results
+# 4. add ui to display scene description and next action
