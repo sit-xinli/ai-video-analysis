@@ -3,21 +3,22 @@ import cv2
 import torch
 from openai import OpenAI
 import torchaudio
-import numpy as np
+#import numpy as np
 from pydub import AudioSegment
-from torchvision import transforms
-from PIL import Image
+#from torchvision import transforms
+#from PIL import Image
 import tempfile
 from moviepy import VideoFileClip
 from transformers import (
-    BlipProcessor, BlipForConditionalGeneration,
+#   BlipProcessor, BlipForConditionalGeneration,
     AutoProcessor, AutoModelForAudioClassification
 )
 import webrtcvad
-import wave
+#import wave
 import os
 import dotenv
 import base64
+import gradio as gr
 
 # Load environment variables from .env file
 dotenv.load_dotenv(override=True)
@@ -87,9 +88,9 @@ def has_speech(mp3_path, aggressiveness=2, min_speech_frames=5):
     return False
 
 # Transcribe speech
-def transcribe_chunk(audio_chunk):
+def transcribe_chunk(audio_chunk, language="en", prompt=None):
     result = "no speech detected"
-    prompt="audio recorded by a disabled person with wheelchair in road"
+    #prompt="audio recorded by a disabled person with wheelchair in road"
     with tempfile.NamedTemporaryFile(suffix=".mp3", delete=True) as tmp:
         audio_chunk.export(tmp.name, format="mp3")
         if has_speech(tmp.name):
@@ -97,14 +98,14 @@ def transcribe_chunk(audio_chunk):
                 transcript =client.audio.transcriptions.create(
                     model="gpt-4o-mini-transcribe", 
                     file=audio_file,
-                    response_format="json",
-                    prompt=prompt # Optional prompt
-                    #language="ja"
+                    prompt = prompt, # Optional
+                    language=language
                     )
-            if transcript.text is None or transcript.text.strip() != prompt:
-                result = transcript.text
-            else:
+            if transcript.text is None or transcript.text.strip() == prompt:
                 print("No speech detected in this audio chunk.")
+            else:
+                result = transcript.text
+                print(f">>>translate>>>> {result}")
         else:
             print("No speech detected in this audio chunk.")
 
@@ -129,7 +130,7 @@ def detect_events(audio_chunk, top_k=5):
 
 # Extract frames from video
 # num_of frames is the total number of frames to extract
-def extract_key_frames(video_path, num_of_frames=10, start_time=0, end_time=None):
+def extract_key_frames(video_path, num_of_frames=6, start_time=0, end_time=None):
     frames = []
 
     if not os.path.exists(video_path):
@@ -152,7 +153,7 @@ def extract_key_frames(video_path, num_of_frames=10, start_time=0, end_time=None
     
     success, frame = cap.read()
     # Use round() for 四捨五入 (rounding to nearest integer)
-    interval = round((end_frame - start_frame) / num_of_frames + 0.5) if end_frame > start_frame else 1
+    interval = round((end_frame - start_frame) / num_of_frames) if end_frame > start_frame else 1
     frame_count = start_frame
     while success and frame_count < end_frame:
         if (frame_count - start_frame) % interval == 0:
@@ -197,7 +198,7 @@ def caption_image(frames, speech, evts):
                 },
                 {"role": "user", "content": content}
             ],
-            max_tokens=300
+            max_tokens=1000
         )
     return response.choices[0].message.content
 
@@ -206,22 +207,22 @@ def generate_scene_description(prompt):
     
     response = client.chat.completions.create(
         model="gpt-4.1-nano",
-        #model="gpt-4o-mini",
         messages=[{"role": "user", "content": prompt}],
         temperature=0.7,
-        max_tokens=1000
+        max_tokens=1000,
+        
     )
     return response.choices[0].message.content.strip()
 
 # Full video analysis pipeline
-def analyze_video(video_path):
+def analyze_video(video_path,  segments_of_video=5, frames_per_segment=6, language="en"):
     
     # Profile the video to get frame count and duration
     _, duration = profile_video(video_path)
 
     #for segmenting video, we will use 3 seconds as the segment length
-    interval_s = round(duration /5 + 0.5) if duration > 5 else 1  # Segment length in seconds
-    num_of_frames = 6  # Number of frames to extract per segment
+    interval_s = round(duration/segments_of_video) if duration > 5 else 1  # Segment length in seconds
+    #num_of_frames = 6  # Number of frames to extract per segment
 
     if not os.path.exists(video_path):
         raise FileNotFoundError(f"Video file {video_path} does not exist.")
@@ -235,52 +236,152 @@ def analyze_video(video_path):
     results = []
     for i, chunk in enumerate(audio_chunks):
         print(f"Processing segment {i+1}/{len(audio_chunks)}...")
-        transcript = transcribe_chunk(chunk) # Transcribe audio chunk use CHATGPT
+
         events = detect_events(chunk) # Detect audio events use Hugging Face AST
+        
+        transcript = transcribe_chunk(chunk, language) # Transcribe audio chunk use CHATGPT -- no prompt 
+
         frames = extract_key_frames(video_path, 
-                                    num_of_frames=num_of_frames, 
+                                    num_of_frames=frames_per_segment, 
                                     start_time=i * interval_s, 
                                     end_time=(i + 1) * interval_s
                                 )
         if len(frames) > 0: # Ensure we have a frame for this segment
-            caption = caption_image(frames, transcript, events) # Caption image using CHATGPT
+            visual_message = caption_image(frames, transcript, events) # Caption image using CHATGPT
         else:
-            caption = "No visual message available"
+            visual_message = "No visual message available"
         
-        results.append((i, transcript, events, caption))
+
+        results.append((i, transcript, events, visual_message))
     return results
 
+def main_process(video_path, init_prompt, language, segments_of_video, frames_per_segment):
+    """
+    The main processing function that analyzes the video and returns the results.
+    """
+    results = analyze_video(video_path, int(segments_of_video), int(frames_per_segment), language)
+    
+    content_prompt = init_prompt
+    # Combine all into GPT prompt
+    for i, transcript, events, caption in results:
+        content_prompt += f""" 
+        --- SEGEMENT {i} ---
+        >>> Detected Speech:
+\"""+transcript+"\""
+        >>> Detected seemingly Sounds:
+"""+', '.join(events)+"""
+        >>> Visual description:
+"""+caption+""" """
+    
+    response = generate_scene_description(content_prompt)
+    
+    # Prepare results for Gradio output
+    segmented_results = [(i, transcript, ', '.join(events), caption) for i, transcript, events, caption in results]
+    
+    return segmented_results, response, video_path
 
-results = analyze_video("2025-05-05 220122.mp4")
-#results = analyze_video("2025-05-27-180908.mp4")
-
-prompt = """
-You are an AI assistant describing scenes from video to a disabled person with wheelchair.
+# Gradio Interface
+prompt_templates = {
+    "Default": """You are an AI assistant describing scenes from video to a disabled person with wheelchair.
 With all the context including in these consecutive SEGEMENTS, Detected Speech and Visual description is more important than Detected Sounds.
-Firstly describe what is happening in the scene, then in order to avoid risk for the disabled person, please advice the NEXT ACTION.
+Firstly describe what is happening in the scene in Japanese, then in order to avoid risk for the disabled person, please advice the NEXT ACTION.
 
 the format of the output MUST be:
 {
-  Description: "A detailed description of the scene, including actions, objects, and people.",
-  NextAction: "Go forward" | "Turn left" | "Turn right" | "Stop" | "Go backward" | "Wait" | "Look around" | "Run away",
+  "Description": "A detailed description of the scene, including actions, objects, and people.",
+  "NextAction": "Go forward" | "Turn left" | "Turn right" | "Stop" | "Go backward" | "Wait" | "Look around" | "Run away"
+}""",
+    "Default(日本語)": """あなたはAIアシスタントで、車椅子に乗った障害者にビデオのシーンを説明します。
+これらの連続したSEGEMENTSに含まれるすべてのコンテキストでは、検出された音声よりも、検出された音声と視覚的な説明の方が重要です。
+まず、そのシーンで何が起こっているかを日本語で説明し、次に障害者の危険を回避するために、次のアクションをアドバイスしてください。
+
+出力の書式は次のようにしなければならない（MUST）:
+{
+  "Description": "行動、物、人を含むシーンの詳細な描写",
+  "NextAction": "進む" | "左に曲がる" | "右に曲がる" | "止まる" | "後進する" | "待つ" | "周囲を見渡す" | "逃げる"
+}""",
+    "Safety First": """Analyze the video for any potential safety hazards. 
+If any are found, describe them in detail and suggest a safe course of action.
+If no hazards are found, state that the scene appears safe.""",
+    "Safety First(日本語)": """ビデオを分析して、潜在的な安全上の危険を特定してください。   
+もし危険が見つかった場合は、それらを詳細に説明し、安全な行動を提案してください。
+危険が見つからない場合は、シーンが安全であると述べてください。"""
 }
 
-"""
+def update_prompt(template_name):
+    return prompt_templates[template_name]
 
-# Combine all into GPT prompt
-for i, transcript, events, caption in results:
-    prompt = f"""{prompt} 
-    --- SEGEMENT {i} ---
-    >>>Detected Speech:\n"{transcript}"
-    >>>Detected seemingly Sounds:\n{', '.join(events)}
-    >>>Visual description:\n{caption} """
-print(prompt)
+with gr.Blocks() as demo:
+    gr.Markdown("# マルチモデルAIビデオ解析")
+    gr.Markdown("Upload a video and provide a prompt to analyze the scene. The AI will provide a description and suggest the next action.")
 
-response = generate_scene_description(prompt)
-print(f"\n\nScene Description: {response}")
+    with gr.Row():
+        with gr.Column():
+            video_input = gr.Video(label="Input Video", sources=["upload", "webcam"])
 
-## TBD(add ui):
-# 1. add ui to input prompt for task 
-# 2. add ui to input video file or camera input
-# 3. add ui to display segmented results
-# 4. add ui to display scene description and next action
+            with gr.Accordion("Parameters", open=False):
+                language_input = gr.Dropdown(
+                    label="Language for Transcription",
+                    choices=["en", "ja", "zh", "ko", "fr", "de", "es"],
+                    value="ja",
+                )
+                segments_of_video_input = gr.Slider(
+                    minimum=1,
+                    maximum=50,
+                    step=1,
+                    value=5,
+                    label="Number of Segments to Analyze",
+                )
+                frames_per_segment_input = gr.Slider(
+                    minimum=1,
+                    maximum=20,
+                    step=1,
+                    value=6,
+                    label="Number of Frames per Segment",
+                )
+            
+            prompt_template_dropdown = gr.Dropdown(
+                label="Prompt Templates",
+                choices=list(prompt_templates.keys()),
+                value="Default"
+            )
+            
+            init_prompt_input = gr.Textbox(
+                label="Initial Prompt",
+                value=prompt_templates["Default"],
+                lines=10
+            )
+            
+            prompt_template_dropdown.change(
+                fn=update_prompt,
+                inputs=prompt_template_dropdown,
+                outputs=init_prompt_input
+            )
+            
+            analyze_button = gr.Button("Analyze Video")
+
+        with gr.Column():
+            video_output = gr.Video(label="Analyzed Video")
+            final_response_output = gr.Textbox(label="Final Response")
+    
+    gr.Markdown("## Segmented Analysis Results")
+    segmented_output = gr.Dataframe(
+        headers=["Segment", "Detected Speech", "Detected Sounds", "Visual Description"],
+        label="Segmented Results"
+    )
+
+    analyze_button.click(
+        fn=main_process,
+        inputs=[
+            video_input, 
+            init_prompt_input, 
+            language_input, 
+            segments_of_video_input, 
+            frames_per_segment_input
+        ],
+        outputs=[segmented_output, final_response_output, video_output]
+    )
+
+if __name__ == "__main__":
+    demo.launch()
+
