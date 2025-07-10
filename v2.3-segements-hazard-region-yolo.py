@@ -301,7 +301,6 @@ def main_process(video_path, init_prompt, language, segments_of_video, frames_pe
     content_prompt = init_prompt + "\n\n" + segmented_results_text
     response = generate_scene_description(content_prompt)
 
-    output_image = None
     hazard_info = "No hazard detected."
     if most_important_hazard_region and hazard_segment_index != -1:
         hazard_info = f"{most_important_hazard_region}"
@@ -321,10 +320,12 @@ def main_process(video_path, init_prompt, language, segments_of_video, frames_pe
             hazard_image_with_box = img.copy()
             for r in yolo_results:
                 for box in r.boxes:
+                    confidence = float(box.conf[0])
+                    if confidence < 0.3: continue
+
                     importance_flag = yolo_model.names[int(box.cls[0].item())] in most_important_hazard_type
                                                 
                     # Draw bounding box on the image for this hazard
-                    
                     box_coords = box.xywhn[0].tolist()
                     x_center = int(box_coords[0] * img_width)
                     y_center = int(box_coords[1] * img_height)
