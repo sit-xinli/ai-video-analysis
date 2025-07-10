@@ -177,7 +177,7 @@ def extract_key_frames(video_path, num_of_frames=5, start_time=0, end_time=None)
     cap.release()
     return frames, frame_dims
 
-# Visual branch using GPT-4.1-nano
+# Caption images
 def visual_branch(frames, speech, evts):
     content = [ {"type": "text", "text": f"Speech: {speech}.\n\nSounds detected: {', '.join(evts)} " } ]
     for frame in frames:
@@ -194,12 +194,20 @@ def visual_branch(frames, speech, evts):
                 {"role": "system", 
                  "content": """You are an AI assistant describing scenes from video to a disabled person with wheelchair.
                   Your task is to analyze the provided images and identify hazard.
-                  The hazard can be anything that may cause harm or risk to the disabled person with wheelchair, 
-                  The typical hazards include curbs, steps, uneven road surface, obstacles, dangerous objects, or unsafe conditions.
-                  Describe the scene accoring to hazards to a disabled person with wheelchair.
+                  The hazard label can be anything that may cause harm or risk to the disabled person with wheelchair,
+                  The typical hazard labels include curbs, steps, uneven road surface, obstacles, dangerous objects, or unsafe conditions.
+                  It is best to use labels appropriate for the context of the scene and usable as labels in yolo8 model.
+                  First, describe the scene accoring to hazards to a disabled person with wheelchair.
+                  Then, provide the bounding box coordinates for the most identified hazard in the most representative image.
+                  The coordinates should be normalized from 0.0 to 1.0 for x, y, width, and height, relative to the image dimensions.
                   The output format MUST be a JSON object with the following structure:
                   {
-                    "Description": "A detailed description of the scene, including actions, objects, and people, and the primary hazard."
+                    "Description": "A detailed description of the scene, including actions, objects, and people, and the primary hazard.",
+                    "HazardRegion": {
+                        "index": <index of the most representative image>,
+                        "score": <confidence score of the hazard region>,
+                        "type": "<type of hazard>",
+                        "box": [x, y, width, height]
                   }
                   """
                 },
@@ -258,15 +266,15 @@ def analyze_video(video_path,  segments_of_video, frames_per_segment=5, language
         if len(frames) > 0:
             visual_message = visual_branch(frames, transcript, events)
             try:
-               visual_message = json.loads(visual_message)
+               visual_json = json.loads(visual_message)
                print(f"JSON response for segment {i}:\n {visual_message} \n")
             except json.JSONDecodeError:
                print(f"Invalid JSON response for segment \n {visual_message} \n")
-               visual_message = {
+               visual_json = {
                    "Description": visual_message
                }
 
-        results.append((i, transcript, events, visual_message))
+        results.append((i, transcript, events, visual_json))
     
     return results, all_frames, all_frame_dims
 
@@ -275,10 +283,8 @@ def main_process(video_path, init_prompt, language, segments_of_video, frames_pe
     
     content_prompt = init_prompt
     segmented_results_text = ""
-    
-    # New YOLO-based hazard detection
-    most_important_hazard = None
-    hazard_image_with_box = None
+    most_important_hazard_region = None
+    hazard_segment_index = -1
 
     for i, (segment_index, transcript, events, visual_message) in enumerate(results):
         segmented_results_text += f"--- SEGMENT {segment_index} ---\n"
@@ -287,49 +293,56 @@ def main_process(video_path, init_prompt, language, segments_of_video, frames_pe
         visual_description = visual_message.get("Description", "N/A")
         segmented_results_text += f"Visual Description: {visual_description}\n\n"
 
-        # YOLO detection on frames of this segment
-        for frame_index, base64_frame in enumerate(all_frames[i]):
+        hazard_region = visual_message.get("HazardRegion", None)            
+        if hazard_region and (most_important_hazard_region is None or hazard_region.get("score", 0) > most_important_hazard_region.get("score", 0)):
+            most_important_hazard_region = hazard_region
+            hazard_segment_index = i
+                    
+    content_prompt = init_prompt + "\n\n" + segmented_results_text
+    response = generate_scene_description(content_prompt)
+
+    output_image = None
+    hazard_info = "No hazard detected."
+    if most_important_hazard_region and hazard_segment_index != -1:
+        hazard_info = f"{most_important_hazard_region}"
+        frame_index = most_important_hazard_region.get("index", 0)
+        if frame_index < len(all_frames[hazard_segment_index]):
+            base64_frame = all_frames[hazard_segment_index][frame_index]
+            
             img_data = base64.b64decode(base64_frame)
             np_arr = np.frombuffer(img_data, np.uint8)
             img = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
             
-            # Run YOLO detection, with prompting for hazards
+            img_width, img_height = all_frame_dims[hazard_segment_index][frame_index]
             yolo_results = yolo_model(img)
             
+            most_important_hazard_type = most_important_hazard_region.get("type", "Hazard")
+
+            hazard_image_with_box = img.copy()
             for r in yolo_results:
                 for box in r.boxes:
-                    current_hazard = {
-                        "box": box.xywhn[0].tolist(), # Normalized xywh
-                        "score": box.conf[0].item(),
-                        "type": yolo_model.names[int(box.cls[0].item())]
-                    }
+                    importance_flag = yolo_model.names[int(box.cls[0].item())] in most_important_hazard_type
+                                                
+                    # Draw bounding box on the image for this hazard
                     
-                    if most_important_hazard is None or current_hazard['score'] > most_important_hazard['score']:
-                        most_important_hazard = current_hazard
-                        
-                        # Draw bounding box on the image for this hazard
-                        img_width, img_height = all_frame_dims[i][frame_index]
-                        box_coords = current_hazard.get("box", [0,0,0,0])
-                        x_center = int(box_coords[0] * img_width)
-                        y_center = int(box_coords[1] * img_height)
-                        width = int(box_coords[2] * img_width)
-                        height = int(box_coords[3] * img_height)
-                        x = int(x_center - width / 2)
-                        y = int(y_center - height / 2)
+                    box_coords = box.xywhn[0].tolist()
+                    x_center = int(box_coords[0] * img_width)
+                    y_center = int(box_coords[1] * img_height)
+                    width = int(box_coords[2] * img_width)
+                    height = int(box_coords[3] * img_height)
+                    x = int(x_center - width / 2)
+                    y = int(y_center - height / 2)
+                    if importance_flag:
+                        color = (0, 255, 0)  # Green for important hazards
+                        label = f'{most_important_hazard_type}: {box.conf[0].item():.2f}'
+                    else:
+                        color = (0, 0, 255)                    
+                        label = f'{yolo_model.names[int(box.cls[0].item())]}: {box.conf[0].item():.2f}'
+                    
+                    # Draw rectangle and label only for the most important hazard type
+                    cv2.rectangle(hazard_image_with_box, (x, y), (x + width, y + height), color, 3)
+                    cv2.putText(hazard_image_with_box, label, (x, y - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.9, color, 2)
 
-                        img_with_box = img.copy()
-                        cv2.rectangle(img_with_box, (x, y), (x + width, y + height), (0, 255, 0), 3)
-                        label = f'{current_hazard.get("type", "Hazard")}: {current_hazard.get("score", 0.0):.2f}'
-                        cv2.putText(img_with_box, label, (x, y - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0,255,0), 2)
-                        hazard_image_with_box = img_with_box
-
-
-    content_prompt = init_prompt + "\n\n" + segmented_results_text
-    response = generate_scene_description(content_prompt)
-
-    hazard_info = "No hazard detected by YOLO."
-    if most_important_hazard:
-        hazard_info = f"{most_important_hazard}"
 
     return segmented_results_text, response, hazard_image_with_box, hazard_info
 
@@ -337,13 +350,12 @@ def main_process(video_path, init_prompt, language, segments_of_video, frames_pe
 prompt_templates = {
     "Default": """You are an AI assistant describing scenes from video to a disabled person with wheelchair.
 With all the context including in these consecutive SEGEMENTS, Detected Speech and Visual description is more important than Detected Sounds.
-Firstly describe what is happening in the scene, then in order to avoid risk for the disabled person with wheelchair, please advice the NEXT ACTION.
+Firstly describe what is happening in the scene, then in order to avoid risk for the disabled person, please advice the NEXT ACTION.
 
 the format of the output MUST be:
 {
   "Description": "A detailed description of the scene, including actions, objects, and people.",
-  "NextAction": "Go forward | Turn left | Turn right | Stop | Go backward | Wait | Look around | Run away | Navigate to location | Avoid obstacle | Adjust speed | Follow person | Return to charger | Emergency stop | Open door | Call elevator | Adjust seat | Send alert | Share location | Request help | Voice command mode | Daily schedule | Entertainment mode"
-
+  "NextAction": "Go forward" | "Turn left" | "Turn right" | "Stop" | "Go backward" | "Wait" | "Look around" | "Run away"
 }""",
     "Default(日本語)": """あなたはAIアシスタントで、車椅子に乗った障害者にビデオのシーンを説明します。
 これらの連続したSEGEMENTSに含まれるすべてのコンテキストでは、検出された音声よりも、検出された音声と視覚的な説明の方が重要です。
@@ -418,7 +430,7 @@ with gr.Blocks() as demo:
         with gr.Column(scale=1):
             gr.Markdown("## Analysis Results")
             gr.Markdown("The most impportant hazard scene and its hazard region shown. The description hazard scene and nex action for a wheelchair user is recommended.")
-            image_output = gr.Image(label="Most Important Hazard Region")
+            image_output = gr.Image(label="Hazard Region")
             hazard_info_output = gr.Textbox(label="Hazard Details")
             final_response_output = gr.Textbox(label="Final Response")
             segmented_output = gr.Textbox(label="Segmented Analysis", lines=15)
