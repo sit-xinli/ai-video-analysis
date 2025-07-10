@@ -208,7 +208,7 @@ def visual_branch(frames, speech, evts):
                     "HazardRegion": {
                         "index": <index of the most representative image>,
                         "score": <confidence score of the hazard region>,
-                        "type": "<type of hazard object>",
+                        "caption": "<caption for the detected hazard object>",
                         "box": [x, y, width, height]
                     }
                   }
@@ -249,13 +249,15 @@ def gemini_detect_objects(image, hazard_type):
         }
     ]
     """
-    _, buffer = cv2.imencode('.jpg', image)
+    
+    image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+    _, buffer = cv2.imencode('.jpg', image_rgb)
     image = types.Part.from_bytes(data=buffer.tobytes(), mime_type="image/jpeg")
 
     response = client_gemini.models.generate_content(
         model="gemini-2.5-flash",
         contents=[
-            f"Analyze the image and detect objects related to '{hazard_type}'. Return bounding boxes in normalized coordinates (0.0 to 1.0) relative to the image dimensions.", 
+            f"Analyze the image and detect objects --- '{hazard_type}'. Return bounding boxes in normalized coordinates (0.0 to 1.0) relative to the image dimensions.", 
             image
         ],
         config=genai.types.GenerateContentConfig(
@@ -263,7 +265,7 @@ def gemini_detect_objects(image, hazard_type):
         )
     )
 
-    #print(f"Detected bounding boxes: {response.text}")
+    print(f"Detected bounding boxes: {response.text}")
     bounding_boxes = json.loads(response.text)
     
     return bounding_boxes
@@ -341,6 +343,7 @@ def main_process(video_path, init_prompt, language, segments_of_video, frames_pe
     response = generate_scene_description(content_prompt)
 
     hazard_info = "No hazard detected."
+    hazard_image_with_box = all_frames[0][0]
     if most_important_hazard_region and hazard_segment_index != -1:
         hazard_info = f"{most_important_hazard_region}"
         frame_index = most_important_hazard_region.get("index", 0)
@@ -351,13 +354,13 @@ def main_process(video_path, init_prompt, language, segments_of_video, frames_pe
             img = cv2.imdecode(np_arr, cv2.IMREAD_COLOR) #keep as BGR format 
             
             img_width, img_height = all_frame_dims[hazard_segment_index][frame_index]
-            most_important_hazard_type = most_important_hazard_region.get("type", "Hazard")
+            most_important_hazard_type = most_important_hazard_region.get("caption", "Hazard")
             bounding_boxes_with_labels = gemini_detect_objects(img, most_important_hazard_type)
         
             hazard_image_with_box = img.copy() #keep BGR ordewr for cv2 drawing
             for bounding_box_with_label in bounding_boxes_with_labels:
-                bounding_box = bounding_box_with_label["box_2d"]
-                label = bounding_box_with_label["label"]
+                bounding_box = bounding_box_with_label.get("box_2d", [0, 0, 0, 0])
+                label = bounding_box_with_label.get("label", "Unknown")
 
                 # Extract bounding box coordinates, note the order is [y1, x1, y2, x2]
                 y1, x1, y2, x2 = bounding_box

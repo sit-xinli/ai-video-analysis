@@ -158,7 +158,7 @@ def extract_key_frames(video_path, num_of_frames=5, start_time=0, end_time=None)
     frame_count = start_frame
     while success and frame_count < end_frame:
         if (frame_count - start_frame) % interval == 0:
-            img = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            img = frame #cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             width, height = img.shape[1], img.shape[0]
             if width > height and width > 800:
                 scale = 800 / width
@@ -194,11 +194,11 @@ def visual_branch(frames, speech, evts):
                 {"role": "system", 
                  "content": """You are an AI assistant describing scenes from video to a disabled person with wheelchair.
                   Your task is to analyze the provided images and identify hazard.
-                  The hazard type can be anything that may cause harm or risk to the disabled person with wheelchair,
-                  The typical hazard types include curbs, steps, uneven road surface, obstacles, dangerous objects, or unsafe conditions.
-                  It is best to output types which is also usable as labels in Ultralytics YOLOv8 model.
+                  The hazard can be anything that may cause harm or risk to the disabled person with wheelchair,
+                  The typical hazard include curbs, steps, uneven road surface, obstacles, dangerous objects, or unsafe conditions.
+                  
                   First, describe the scene accoring to hazards to a disabled person with wheelchair.
-                  Then, provide the bounding box coordinates for the most identified hazard in the most representative image.
+                  Then, provide the exact bounding box coordinates for the identified hazard object in the most hazard image.
                   The coordinates should be normalized from 0.0 to 1.0 for x, y, width, and height, relative to the image dimensions.
                   The output format MUST be a JSON object with the following structure:
                   {
@@ -206,8 +206,9 @@ def visual_branch(frames, speech, evts):
                     "HazardRegion": {
                         "index": <index of the most representative image>,
                         "score": <confidence score of the hazard region>,
-                        "type": "<type of hazard>",
+                        "caption": "<caption for the detected hazard object>",
                         "box": [x, y, width, height]
+                    }
                   }
                   """
                 },
@@ -313,11 +314,12 @@ def main_process(video_path, init_prompt, language, segments_of_video, frames_pe
             img = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
             
             img_width, img_height = all_frame_dims[hazard_segment_index][frame_index]
-            yolo_results = yolo_model(img)
-            
-            most_important_hazard_type = most_important_hazard_region.get("type", "Hazard")
+                        
+            most_important_hazard_type = most_important_hazard_region.get("caption", "Unknown Hazard")
 
-            hazard_image_with_box = img.copy()
+            hazard_image_with_box = cv2.cvtColor(img, cv2.COLOR_BGR2RGB) # for gr ouput
+            yolo_results = yolo_model(hazard_image_with_box) #yolo use RGB format
+
             for r in yolo_results:
                 for box in r.boxes:
                     confidence = float(box.conf[0])
@@ -341,7 +343,7 @@ def main_process(video_path, init_prompt, language, segments_of_video, frames_pe
                         label = f'{yolo_model.names[int(box.cls[0].item())]}: {box.conf[0].item():.2f}'
                     
                     # Draw rectangle and label only for the most important hazard type
-                    cv2.rectangle(hazard_image_with_box, (x, y), (x + width, y + height), color, 3)
+                    cv2.rectangle(hazard_image_with_box, (x, y), (x + width, y + height), color, 3) # the RGB order is also OK
                     cv2.putText(hazard_image_with_box, label, (x, y - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.9, color, 2)
 
 
