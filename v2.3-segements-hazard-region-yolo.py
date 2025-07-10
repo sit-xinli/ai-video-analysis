@@ -194,9 +194,9 @@ def visual_branch(frames, speech, evts):
                 {"role": "system", 
                  "content": """You are an AI assistant describing scenes from video to a disabled person with wheelchair.
                   Your task is to analyze the provided images and identify hazard.
-                  The hazard label can be anything that may cause harm or risk to the disabled person with wheelchair,
-                  The typical hazard labels include curbs, steps, uneven road surface, obstacles, dangerous objects, or unsafe conditions.
-                  It is best to use labels appropriate for the context of the scene and usable as labels in yolo8 model.
+                  The hazard type can be anything that may cause harm or risk to the disabled person with wheelchair,
+                  The typical hazard types include curbs, steps, uneven road surface, obstacles, dangerous objects, or unsafe conditions.
+                  It is best to output types which is also usable as labels in Ultralytics YOLOv8 model.
                   First, describe the scene accoring to hazards to a disabled person with wheelchair.
                   Then, provide the bounding box coordinates for the most identified hazard in the most representative image.
                   The coordinates should be normalized from 0.0 to 1.0 for x, y, width, and height, relative to the image dimensions.

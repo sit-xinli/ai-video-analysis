@@ -193,9 +193,9 @@ def visual_branch(frames, speech, evts):
             messages=[
                 {"role": "system", 
                  "content": """You are an AI assistant describing scenes from video to a disabled person with wheelchair.
-                  Your task is to analyze the provided images and identify hazard.
-                  The hazard can be anything that may cause harm or risk to the disabled person with wheelchair, 
-                  The typical hazards include curbs, steps, uneven road surface, obstacles, dangerous objects, or unsafe conditions.
+                  Your task is to analyze the provided images and identify hazard scenes.
+                  The hazard label can be anything that may cause harm or risk to the disabled person with wheelchair, 
+                  The typical hazard labels include curbs, steps, uneven road surface, obstacles, dangerous objects, or unsafe conditions.
                   Describe the scene accoring to hazards to a disabled person with wheelchair.
                   The output format MUST be a JSON object with the following structure:
                   {
@@ -371,7 +371,7 @@ with gr.Blocks() as demo:
     with gr.Row():
         with gr.Column(scale=1):
             gr.Markdown("## Video Input")
-            gr.Markdown("Upload a video and provide a prompt to analyze the scene. The AI will provide a description and suggest the next action.")
+            gr.Markdown("Upload a video or use camera for capturing video and provide a prompt to analyze the scene.")
             video_input = gr.Video(label="Input Video", sources=["upload", "webcam"])
 
             with gr.Accordion("Parameters", open=False):
@@ -417,7 +417,7 @@ with gr.Blocks() as demo:
 
         with gr.Column(scale=1):
             gr.Markdown("## Analysis Results")
-            gr.Markdown("The most impportant hazard scene and its hazard region shown. The description hazard scene and nex action for a wheelchair user is recommended.")
+            gr.Markdown("The hazard scene with hazard regions")
             image_output = gr.Image(label="Most Important Hazard Region")
             hazard_info_output = gr.Textbox(label="Hazard Details")
             final_response_output = gr.Textbox(label="Final Response")
@@ -429,7 +429,7 @@ with gr.Blocks() as demo:
             video_input, 
             init_prompt_input, 
             language_input, 
-            segments_of_video_input, 
+            segments_of_video_input,
             frames_per_segment_input
         ],
         outputs=[segmented_output, final_response_output, image_output, hazard_info_output]
