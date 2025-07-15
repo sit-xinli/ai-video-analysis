@@ -1,4 +1,5 @@
 import os
+import re
 import cv2
 import torch
 from openai import OpenAI
@@ -17,7 +18,8 @@ import os
 import dotenv
 import base64
 import gradio as gr
-from ultralytics import YOLO
+from google import genai
+from google.genai import types
 
 # Load environment variables from .env file
 dotenv.load_dotenv(override=True)
@@ -27,15 +29,15 @@ HF_TOKEN = os.getenv("HF_TOKEN")
 if OPENAI_API_KEY is None or OPENAI_BASE_URL is None or HF_TOKEN is None:
     raise ValueError("Please set the OPENAI_API_KEY, OPENAI_URL, and HF_TOKEN environment variables.")
    
-client = OpenAI(api_key=OPENAI_API_KEY, base_url=OPENAI_BASE_URL)
+client_openai = OpenAI(api_key=OPENAI_API_KEY, base_url=OPENAI_BASE_URL)
 
 # Load Hugging Face audio classifier
 audio_processor = AutoProcessor.from_pretrained("suhacan/ast-finetuned-audioset-10-10-0.4593-finetuned-gtzan")
 audio_model = AutoModelForAudioClassification.from_pretrained("suhacan/ast-finetuned-audioset-10-10-0.4593-finetuned-gtzan")
 audio_model.eval()
 
-# Load YOLO model
-yolo_model = YOLO('yolov8n.pt')  # Using a standard YOLOv8 model
+# Gemini APIキーを環境変数から取得
+client_gemini = genai.Client(api_key=os.environ.get("GEMINI_API_KEY"))
 
 # Helper: profile video to get frame count and duration (seconds)
 def profile_video(video_path):
@@ -100,7 +102,7 @@ def speech_branch(audio_chunk, language="en"):
         audio_chunk.export(tmp.name, format="mp3")
         if has_speech(tmp.name):
             with open(tmp.name, "rb") as audio_file:
-                transcript =client.audio.transcriptions.create(
+                transcript =client_openai.audio.transcriptions.create(
                     model="gpt-4o-mini-transcribe", 
                     file=audio_file,
                     prompt = prompt, # Optional
@@ -188,21 +190,13 @@ def visual_branch(frames, speech, evts):
                 }
             })
     
-    response = client.chat.completions.create(
+    response = client_openai.chat.completions.create(
             model="gpt-4.1-nano",
             messages=[
                 {"role": "system", 
-                 "content": """You are an AI assistant describing scenes from video to a disabled person with wheelchair moving forward.
-                  Your task is to analyze the provided images to identify forward direction and identify hazard objects for moving forward.
-                  The hazard objects can be anything that may cause harm or risk to the disabled person with wheelchair,
-                  The typical hazard include curbs, steps, uneven road surface, obstacles, dangerous objects, or unsafe conditions.
-                  
-                  First, describe the hazard scene to a disabled person with wheelchair moving forward.
-                  Then, provide the exact bounding box coordinates for the identified hazard object in the most hazard image.
-                  The coordinates should be normalized from 0.0 to 1.0 for x, y, width, and height, relative to the image dimensions.
-                  The output format MUST be a JSON object with the following structure:
+                 "content": """You are an AI assistant describing scenes from video to a disabled person with wheelchair. Your task is to analyze the provided images and identify hazard. The hazard can be anything that may cause harm or risk to the disabled person with wheelchair. The typical hazard include curbs, steps, uneven road surface, obstacles, dangerous objects, or unsafe conditions. First, describe the scene according to hazards to a disabled person with wheelchair. Then, provide the exact bounding box coordinates for the identified hazard object in the most hazard image. The coordinates should be normalized from 0.0 to 1.0 for x, y, width, and height, relative to the image dimensions. The output format MUST be a JSON object with the following structure:
                   {
-                    "Description": "A detailed description of the hazard scene, including actions, objects, and people, and the primary hazard.",
+                    "Description": "A detailed description of the scene, including actions, objects, and people, and the primary hazard.",
                     "HazardRegion": {
                         "index": <index of the most representative image>,
                         "score": <confidence score of the hazard region>,
@@ -221,7 +215,7 @@ def visual_branch(frames, speech, evts):
 # generate scene description using GPT
 def generate_scene_description(prompt):
     
-    response = client.chat.completions.create(
+    response = client_openai.chat.completions.create(
         model="gpt-4.1-nano",
         messages=[{"role": "user", "content": prompt}],
         temperature=0.7,
@@ -229,6 +223,44 @@ def generate_scene_description(prompt):
         
     )
     return response.choices[0].message.content.strip()
+
+def gemini_detect_objects(image, hazard_type):
+    """
+    Detect objects in the image using Gemini API.
+    Returns a list of detected objects with their bounding boxes and confidence scores.
+    
+    the format of the response is expected to be a JSON string with bounding boxes
+    [
+        {
+            "box_2d": [0.1604, 0.5990, 0.6050, 0.9896],
+            "label": "overturned vehicle"
+        },
+        {
+            "box_2d": [0.0000, 0.0000, 1.0000, 1.0000],
+            "label": "person"
+        }
+    ]
+    """
+    
+    image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+    _, buffer = cv2.imencode('.jpg', image_rgb)
+    image = types.Part.from_bytes(data=buffer.tobytes(), mime_type="image/jpeg")
+
+    response = client_gemini.models.generate_content(
+        model="gemini-2.5-flash",
+        contents=[
+            f"Analyze the image and detect objects --- '{hazard_type}'. Return bounding boxes in normalized coordinates (0.0 to 1.0) relative to the image dimensions.", 
+            image
+        ],
+        config=genai.types.GenerateContentConfig(
+            response_mime_type="application/json"
+        )
+    )
+
+    print(f"Detected bounding boxes: {response.text}")
+    bounding_boxes = json.loads(response.text)
+    
+    return bounding_boxes
 
 # Full video analysis pipeline
 def analyze_video(video_path,  segments_of_video, frames_per_segment=5, language="en"):
@@ -303,62 +335,45 @@ def main_process(video_path, init_prompt, language, segments_of_video, frames_pe
     response = generate_scene_description(content_prompt)
 
     hazard_info = "No hazard detected."
+    hazard_image_with_box = all_frames[0][0]
     if most_important_hazard_region and hazard_segment_index != -1:
         hazard_info = f"{most_important_hazard_region}"
         frame_index = most_important_hazard_region.get("index", 0)
         if frame_index < len(all_frames[hazard_segment_index]):
             base64_frame = all_frames[hazard_segment_index][frame_index]
-            
             img_data = base64.b64decode(base64_frame)
             np_arr = np.frombuffer(img_data, np.uint8)
-            img = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
+            img = cv2.imdecode(np_arr, cv2.IMREAD_COLOR) #keep as BGR format 
             
             img_width, img_height = all_frame_dims[hazard_segment_index][frame_index]
-                        
-            most_important_hazard_type = most_important_hazard_region.get("caption", "Unknown Hazard")
+            most_important_hazard_type = most_important_hazard_region.get("caption", "Hazard")
+            bounding_boxes_with_labels = gemini_detect_objects(img, most_important_hazard_type)
+        
+            hazard_image_with_box = img.copy() #keep BGR ordewr for cv2 drawing
+            for bounding_box_with_label in bounding_boxes_with_labels:
+                bounding_box = bounding_box_with_label.get("box_2d", [0, 0, 0, 0])
+                label = bounding_box_with_label.get("label", "Unknown")
 
-            hazard_image_with_box = cv2.cvtColor(img, cv2.COLOR_BGR2RGB) # for gr ouput
-            yolo_results = yolo_model(hazard_image_with_box) #yolo use RGB format
+                # Extract bounding box coordinates, note the order is [y1, x1, y2, x2]
+                y1, x1, y2, x2 = bounding_box
+                # convert normalize coordinates to the image dimensions
+                x1, y1 = int(x1 * img_width), int(y1 * img_height)
+                x2, y2 = int(x2 * img_width), int(y2 * img_height)                           
+                # Draw rectangle and label only for the most important hazard type
+                cv2.rectangle(hazard_image_with_box, (x1, y1), (x2, y2), (0,255,0), 3)
+                cv2.putText(hazard_image_with_box, label, (x1+2, y1-5), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0,255,0), 2)
 
-            for r in yolo_results:
-                for box in r.boxes:
-                    confidence = float(box.conf[0])
-                    if confidence < 0.3: continue
-
-                    importance_flag = yolo_model.names[int(box.cls[0].item())] in most_important_hazard_type
-                                                
-                    # Draw bounding box on the image for this hazard
-                    box_coords = box.xywhn[0].tolist()
-                    x_center = int(box_coords[0] * img_width)
-                    y_center = int(box_coords[1] * img_height)
-                    width = int(box_coords[2] * img_width)
-                    height = int(box_coords[3] * img_height)
-                    x = int(x_center - width / 2)
-                    y = int(y_center - height / 2)
-                    if importance_flag:
-                        color = (0, 255, 0)  # Green for important hazards
-                        label = f'{most_important_hazard_type}: {box.conf[0].item():.2f}'
-                    else:
-                        color = (0, 0, 255)                    
-                        label = f'{yolo_model.names[int(box.cls[0].item())]}: {box.conf[0].item():.2f}'
-                    
-                    # Draw rectangle and label only for the most important hazard type
-                    cv2.rectangle(hazard_image_with_box, (x, y), (x + width, y + height), color, 3) # the RGB order is also OK
-                    #cv2.putText(hazard_image_with_box, label, (x, y - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.9, color, 2)
-
-
-    return segmented_results_text, response, hazard_image_with_box, hazard_info
+    return segmented_results_text, response, cv2.cvtColor(hazard_image_with_box, cv2.COLOR_BGR2RGB), hazard_info
 
 # Gradio Interface
 prompt_templates = {
-    "Default": """You are an AI assistant describing scenes from video to a disabled person with wheelchair moving forward. With all the context including in these consecutive SEGEMENTS, Detected Speech and Visual description is more important than Detected Sounds.
-Firstly, please describe what is the hazard scene to move forward, and then to avoid risk for the disabled person with wheelchair, please predict abd advice the NextAction.
+    "Default": """You are an AI assistant describing scenes from video to a disabled person with wheelchair. With all the context including in these consecutive SEGEMENTS, Detected Speech and Visual description is more important than Detected Sounds.
+Firstly, please describe what is happening in the scene, and then to avoid risk for the disabled person with wheelchair, please advice the NextAction.
 The FORMAT of the output MUST be:
 {
   "Description": "A detailed description of the scene, including actions, objects, and people.",
   "NextAction": "Go forward | Turn left | Turn right | Stop | Go backward | Wait | Look around | Run away | Navigate to location | Avoid obstacle | Adjust speed | Follow person | Return to charger | Emergency stop | Open door | Call elevator | Adjust seat | Send alert | Share location | Request help | Voice command mode | Daily schedule | Entertainment mode"
-}
-""",
+}""",
     "Default(日本語)": """あなたはAIアシスタントで、車椅子に乗った障害者にビデオのシーンを説明します。
 これらの連続したSEGEMENTSに含まれるすべてのコンテキストでは、検出された音声よりも、検出された音声と視覚的な説明の方が重要です。
 まず、そのシーンで何が起こっているかを日本語で説明し、次に障害者の危険を回避するために、次のアクションをアドバイスしてください。

@@ -1,4 +1,5 @@
 import os
+import re
 import cv2
 import torch
 from openai import OpenAI
@@ -10,14 +11,15 @@ import numpy as np
 import tempfile
 from moviepy import VideoFileClip
 from transformers import (
-    AutoProcessor, AutoModelForAudioClassification
+    AutoProcessor, AutoModelForAudioClassification,AutoModelForZeroShotObjectDetection
 )
 import webrtcvad
 import os
 import dotenv
 import base64
 import gradio as gr
-from ultralytics import YOLO
+from google import genai
+from google.genai import types
 
 # Load environment variables from .env file
 dotenv.load_dotenv(override=True)
@@ -27,15 +29,20 @@ HF_TOKEN = os.getenv("HF_TOKEN")
 if OPENAI_API_KEY is None or OPENAI_BASE_URL is None or HF_TOKEN is None:
     raise ValueError("Please set the OPENAI_API_KEY, OPENAI_URL, and HF_TOKEN environment variables.")
    
-client = OpenAI(api_key=OPENAI_API_KEY, base_url=OPENAI_BASE_URL)
+client_openai = OpenAI(api_key=OPENAI_API_KEY, base_url=OPENAI_BASE_URL)
 
 # Load Hugging Face audio classifier
 audio_processor = AutoProcessor.from_pretrained("suhacan/ast-finetuned-audioset-10-10-0.4593-finetuned-gtzan")
 audio_model = AutoModelForAudioClassification.from_pretrained("suhacan/ast-finetuned-audioset-10-10-0.4593-finetuned-gtzan")
 audio_model.eval()
 
-# Load YOLO model
-yolo_model = YOLO('yolov8n.pt')  # Using a standard YOLOv8 model
+# GroundingDINO
+# Set device to GPU if available
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+model_id = "IDEA-Research/grounding-dino-base"
+# Load the pretrained DETR model and processor
+zeroshot_processor = AutoProcessor.from_pretrained(model_id)
+zeroshot_model = AutoModelForZeroShotObjectDetection.from_pretrained(model_id).to(device)
 
 # Helper: profile video to get frame count and duration (seconds)
 def profile_video(video_path):
@@ -100,7 +107,7 @@ def speech_branch(audio_chunk, language="en"):
         audio_chunk.export(tmp.name, format="mp3")
         if has_speech(tmp.name):
             with open(tmp.name, "rb") as audio_file:
-                transcript =client.audio.transcriptions.create(
+                transcript =client_openai.audio.transcriptions.create(
                     model="gpt-4o-mini-transcribe", 
                     file=audio_file,
                     prompt = prompt, # Optional
@@ -188,7 +195,7 @@ def visual_branch(frames, speech, evts):
                 }
             })
     
-    response = client.chat.completions.create(
+    response = client_openai.chat.completions.create(
             model="gpt-4.1-nano",
             messages=[
                 {"role": "system", 
@@ -221,7 +228,7 @@ def visual_branch(frames, speech, evts):
 # generate scene description using GPT
 def generate_scene_description(prompt):
     
-    response = client.chat.completions.create(
+    response = client_openai.chat.completions.create(
         model="gpt-4.1-nano",
         messages=[{"role": "user", "content": prompt}],
         temperature=0.7,
@@ -229,6 +236,44 @@ def generate_scene_description(prompt):
         
     )
     return response.choices[0].message.content.strip()
+
+def grounding_dino(image, caption):
+    """
+    Detect objects in the image using GroundingDINO API.
+    Returns a list of detected objects with their bounding boxes and confidence scores.
+    
+    the format of the response is expected to be a JSON string with bounding boxes
+    [
+        scores:[], 
+        labels:[], 
+        boxes:[]
+    ]
+    """
+    
+    # Preprocess the image
+    inputs = zeroshot_processor(images=image, text=caption, return_tensors="pt").to(device)
+
+    # Forward pass
+    with torch.no_grad():
+        outputs = zeroshot_model(**inputs)
+
+    scores = outputs.logits.softmax(-1)[..., :-1].max(-1).values
+    threshold = scores.quantile(0.5)  # Keep top 80% confident predictions
+
+    # Post-process the results (keep only high-confidence predictions)
+    # If image is a PIL Image
+    if hasattr(image, "size"):
+        target_sizes = torch.tensor([image.size[::-1]])  # (height, width)
+
+    # If image is a NumPy array or Torch tensor
+    elif hasattr(image, "shape"):
+        height, width = image.shape[:2]
+        target_sizes = torch.tensor([[height, width]])
+
+
+    results = zeroshot_processor.post_process_grounded_object_detection(outputs, target_sizes=target_sizes, box_threshold=0.3, text_threshold=0.3)[0]
+        
+    return results
 
 # Full video analysis pipeline
 def analyze_video(video_path,  segments_of_video, frames_per_segment=5, language="en"):
@@ -303,51 +348,28 @@ def main_process(video_path, init_prompt, language, segments_of_video, frames_pe
     response = generate_scene_description(content_prompt)
 
     hazard_info = "No hazard detected."
+    hazard_image_with_box = all_frames[0][0]
     if most_important_hazard_region and hazard_segment_index != -1:
         hazard_info = f"{most_important_hazard_region}"
         frame_index = most_important_hazard_region.get("index", 0)
         if frame_index < len(all_frames[hazard_segment_index]):
             base64_frame = all_frames[hazard_segment_index][frame_index]
-            
             img_data = base64.b64decode(base64_frame)
             np_arr = np.frombuffer(img_data, np.uint8)
-            img = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
+            img = cv2.imdecode(np_arr, cv2.IMREAD_COLOR) #keep as BGR format 
             
-            img_width, img_height = all_frame_dims[hazard_segment_index][frame_index]
-                        
-            most_important_hazard_type = most_important_hazard_region.get("caption", "Unknown Hazard")
+            most_important_hazard_type = most_important_hazard_region.get("caption", "Hazard")
+            bounding_boxes = grounding_dino(img, most_important_hazard_type)
+        
+            hazard_image_with_box = img.copy() #keep BGR order for cv2 drawing
+            for score, label, box in zip(bounding_boxes["scores"], bounding_boxes["labels"], bounding_boxes["boxes"]):
+                xmin, ymin, xmax, ymax = box.cpu().numpy()
+                                                         
+                # Draw rectangle and label only for the most important hazard type
+                cv2.rectangle(hazard_image_with_box, (xmin, ymin), ( xmax, ymax), (0,255,0), 3)
+                cv2.putText(hazard_image_with_box, f"{label}:{score}", (xmin+2, ymin-5), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0,255,0), 2)
 
-            hazard_image_with_box = cv2.cvtColor(img, cv2.COLOR_BGR2RGB) # for gr ouput
-            yolo_results = yolo_model(hazard_image_with_box) #yolo use RGB format
-
-            for r in yolo_results:
-                for box in r.boxes:
-                    confidence = float(box.conf[0])
-                    if confidence < 0.3: continue
-
-                    importance_flag = yolo_model.names[int(box.cls[0].item())] in most_important_hazard_type
-                                                
-                    # Draw bounding box on the image for this hazard
-                    box_coords = box.xywhn[0].tolist()
-                    x_center = int(box_coords[0] * img_width)
-                    y_center = int(box_coords[1] * img_height)
-                    width = int(box_coords[2] * img_width)
-                    height = int(box_coords[3] * img_height)
-                    x = int(x_center - width / 2)
-                    y = int(y_center - height / 2)
-                    if importance_flag:
-                        color = (0, 255, 0)  # Green for important hazards
-                        label = f'{most_important_hazard_type}: {box.conf[0].item():.2f}'
-                    else:
-                        color = (0, 0, 255)                    
-                        label = f'{yolo_model.names[int(box.cls[0].item())]}: {box.conf[0].item():.2f}'
-                    
-                    # Draw rectangle and label only for the most important hazard type
-                    cv2.rectangle(hazard_image_with_box, (x, y), (x + width, y + height), color, 3) # the RGB order is also OK
-                    #cv2.putText(hazard_image_with_box, label, (x, y - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.9, color, 2)
-
-
-    return segmented_results_text, response, hazard_image_with_box, hazard_info
+    return segmented_results_text, response, cv2.cvtColor(hazard_image_with_box, cv2.COLOR_BGR2RGB), hazard_info
 
 # Gradio Interface
 prompt_templates = {
@@ -357,8 +379,7 @@ The FORMAT of the output MUST be:
 {
   "Description": "A detailed description of the scene, including actions, objects, and people.",
   "NextAction": "Go forward | Turn left | Turn right | Stop | Go backward | Wait | Look around | Run away | Navigate to location | Avoid obstacle | Adjust speed | Follow person | Return to charger | Emergency stop | Open door | Call elevator | Adjust seat | Send alert | Share location | Request help | Voice command mode | Daily schedule | Entertainment mode"
-}
-""",
+}""",
     "Default(日本語)": """あなたはAIアシスタントで、車椅子に乗った障害者にビデオのシーンを説明します。
 これらの連続したSEGEMENTSに含まれるすべてのコンテキストでは、検出された音声よりも、検出された音声と視覚的な説明の方が重要です。
 まず、そのシーンで何が起こっているかを日本語で説明し、次に障害者の危険を回避するために、次のアクションをアドバイスしてください。
