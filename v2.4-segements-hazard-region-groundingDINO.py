@@ -6,7 +6,7 @@ from openai import OpenAI
 import torchaudio
 import json
 from pydub import AudioSegment
-from PIL import Image
+from PIL import Image,ExifTags
 import numpy as np
 import tempfile
 from moviepy import VideoFileClip
@@ -20,6 +20,7 @@ import base64
 import gradio as gr
 from google import genai
 from google.genai import types
+from pymediainfo import MediaInfo
 
 # Load environment variables from .env file
 dotenv.load_dotenv(override=True)
@@ -44,9 +45,26 @@ model_id = "IDEA-Research/grounding-dino-base"
 zeroshot_processor = AutoProcessor.from_pretrained(model_id)
 zeroshot_model = AutoModelForZeroShotObjectDetection.from_pretrained(model_id).to(device)
 
+
+#get rotation for video
+def get_rotation(video_path):
+    media_info = MediaInfo.parse(video_path)
+    for track in media_info.tracks:
+        if track.track_type == "Video":
+            return int(float(track.rotation))  # May return None if not present
+    return 0
+
+
 # Helper: profile video to get frame count and duration (seconds)
 def profile_video(video_path):
-    cap = cv2.VideoCapture(video_path)
+
+    rotation = get_rotation(video_path)
+    print(f"^^^^^^^^^^^^^^^^^^^^^^^Rotation: {rotation} degrees ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^")
+
+    cap = cv2.VideoCapture(video_path)    
+    width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+
     if not cap.isOpened():
         raise ValueError(f"Cannot open video file {video_path}")
     frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
@@ -55,7 +73,7 @@ def profile_video(video_path):
     cap.release()
     print(f"Frame count: {frame_count}, FPS: {fps}, Duration: {duration:.2f} seconds")
 
-    return (frame_count, duration)
+    return (frame_count, duration, rotation)
 
 # Helper: extract audio from video
 def extract_audio(video_path):
@@ -140,9 +158,9 @@ def acoustic_event_branch(audio_chunk, top_k=5):
     return labels
 
 # Extract frames from video
-def extract_key_frames(video_path, num_of_frames=5, start_time=0, end_time=None):
+def extract_key_frames(video_path, num_of_frames=5, start_time=0, end_time=None, rotation=0):
     frames = []
-    frame_dims = []
+    #frame_dims = []
 
     if not os.path.exists(video_path):
         raise FileNotFoundError(f"Video file {video_path} does not exist.")
@@ -165,7 +183,14 @@ def extract_key_frames(video_path, num_of_frames=5, start_time=0, end_time=None)
     frame_count = start_frame
     while success and frame_count < end_frame:
         if (frame_count - start_frame) % interval == 0:
-            img = frame #cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            img = frame
+            if rotation == 90 : 
+                img = cv2.rotate(img, cv2.ROTATE_90_CLOCKWISE)
+            elif rotation == 180:
+                img = cv2.rotate(img, cv2.ROTATE_180)
+            elif rotation ==270:
+                img = cv2.rotate(img, cv2.ROTATE_90_COUNTERCLOCKWISE)
+
             width, height = img.shape[1], img.shape[0]
             if width > height and width > 800:
                 scale = 800 / width
@@ -174,15 +199,22 @@ def extract_key_frames(video_path, num_of_frames=5, start_time=0, end_time=None)
                 scale = 800 / height
                 img = cv2.resize(img, (int(width * scale), 800))
             
-            frame_dims.append((img.shape[1], img.shape[0]))
+            #frame_dims.append((img.shape[1], img.shape[0]))
             _, buffer = cv2.imencode('.jpg', img)
+            """
+            Even though buffer is a NumPy array (from cv2.imencode), 
+            base64.b64encode() automatically treats it as bytes 
+            because NumPy arrays support the buffer protocol. 
+            So you don’t need to explicitly call .tobytes() — base64.b64encode() handles it internally.
+            """
             base64_frame = base64.b64encode(buffer).decode('utf-8')
             frames.append(base64_frame)
 
         success, frame = cap.read()
         frame_count += 1
     cap.release()
-    return frames, frame_dims
+    
+    return frames
 
 # Caption images
 def visual_branch(frames, speech, evts):
@@ -236,7 +268,14 @@ def generate_scene_description(prompt):
         
     )
     return response.choices[0].message.content.strip()
+"""
+GroudingDINO require image in RGB color order"
+size = (original_width, original_height)
 
+if (original_width > original_height and width < height ) or (original_width < original_height and width > height)
+  oratate image 90 or 270
+
+"""
 def grounding_dino(image, caption):
     """
     Detect objects in the image using GroundingDINO API.
@@ -258,27 +297,24 @@ def grounding_dino(image, caption):
         outputs = zeroshot_model(**inputs)
 
     scores = outputs.logits.softmax(-1)[..., :-1].max(-1).values
-    threshold = scores.quantile(0.5)  # Keep top 80% confident predictions
+    threshold = scores.quantile(0.2)  # Keep top 80% confident predictions
 
-    # Post-process the results (keep only high-confidence predictions)
-    # If image is a PIL Image
-    if hasattr(image, "size"):
-        target_sizes = torch.tensor([image.size[::-1]])  # (height, width)
-
-    # If image is a NumPy array or Torch tensor
-    elif hasattr(image, "shape"):
+    # Post-process the results (keep only high-confidence predictions) 
+    if hasattr(image, "shape"):
         height, width = image.shape[:2]
         target_sizes = torch.tensor([[height, width]])
-
-
-    results = zeroshot_processor.post_process_grounded_object_detection(outputs, target_sizes=target_sizes, box_threshold=0.3, text_threshold=0.3)[0]
+    elif hasattr(image, "size"):  #if have shape, the size if the whole size of image (channel*w*h)
+        target_sizes = torch.tensor([image.size[::-1]])  # (height, width)
         
+    
+    results = zeroshot_processor.post_process_grounded_object_detection(outputs, target_sizes=target_sizes, box_threshold=threshold, text_threshold=0.3)[0]
+    
     return results
 
 # Full video analysis pipeline
 def analyze_video(video_path,  segments_of_video, frames_per_segment=5, language="en"):
     
-    _, duration = profile_video(video_path)
+    _, duration, rotation = profile_video(video_path)
 
     # if video duration is less than 3 seconds, use 1 second interval
     interval_s = round(duration/segments_of_video) if duration > 3 else 1
@@ -294,7 +330,7 @@ def analyze_video(video_path,  segments_of_video, frames_per_segment=5, language
     
     results = []
     all_frames = []
-    all_frame_dims = []
+    #all_frame_dims = []
     
     for i, chunk in enumerate(audio_chunks):
         print(f"Processing segment {i+1}/{len(audio_chunks)}...")
@@ -302,13 +338,13 @@ def analyze_video(video_path,  segments_of_video, frames_per_segment=5, language
         events = acoustic_event_branch(chunk)
         transcript = speech_branch(chunk, language)
 
-        frames, frame_dims = extract_key_frames(video_path, 
+        frames = extract_key_frames(video_path, 
                                     num_of_frames=frames_per_segment, 
                                     start_time=i * interval_s, 
-                                    end_time=(i + 1) * interval_s
-                                )
+                                    end_time=(i + 1) * interval_s, 
+                                    rotation=rotation)
         all_frames.append(frames)
-        all_frame_dims.append(frame_dims)
+        #all_frame_dims.append(frame_dims)
         if len(frames) > 0:
             visual_message = visual_branch(frames, transcript, events)
             try:
@@ -322,10 +358,10 @@ def analyze_video(video_path,  segments_of_video, frames_per_segment=5, language
 
         results.append((i, transcript, events, visual_json))
     
-    return results, all_frames, all_frame_dims
+    return results, all_frames, rotation
 
 def main_process(video_path, init_prompt, language, segments_of_video, frames_per_segment):
-    results, all_frames, all_frame_dims = analyze_video(video_path, int(segments_of_video), int(frames_per_segment), language)
+    results, all_frames, rotation = analyze_video(video_path, int(segments_of_video), int(frames_per_segment), language)
     
     content_prompt = init_prompt
     segmented_results_text = ""
@@ -354,27 +390,30 @@ def main_process(video_path, init_prompt, language, segments_of_video, frames_pe
         frame_index = most_important_hazard_region.get("index", 0)
         if frame_index < len(all_frames[hazard_segment_index]):
             base64_frame = all_frames[hazard_segment_index][frame_index]
-            img_data = base64.b64decode(base64_frame)
-            np_arr = np.frombuffer(img_data, np.uint8)
-            img = cv2.imdecode(np_arr, cv2.IMREAD_COLOR) #keep as BGR format 
+            #old_width, old_height = all_frame_dims[hazard_segment_index][frame_index]
             
+            img_data = base64.b64decode(base64_frame)
+            np_arr = np.frombuffer(img_data, np.uint8) #Creates a 1D NumPy array from the raw bytes buffer.
+            #convert from a NumPy array back into an actual image matrix that OpenCV can work with,kept as BGR format 
+            img = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
             most_important_hazard_type = most_important_hazard_region.get("caption", "Hazard")
-            bounding_boxes = grounding_dino(img, most_important_hazard_type)
-        
             hazard_image_with_box = img.copy() #keep BGR order for cv2 drawing
+            
+
+            bounding_boxes = grounding_dino(cv2.cvtColor(hazard_image_with_box, cv2.COLOR_BGR2RGB), most_important_hazard_type)
             for score, label, box in zip(bounding_boxes["scores"], bounding_boxes["labels"], bounding_boxes["boxes"]):
-                xmin, ymin, xmax, ymax = box.cpu().numpy()
-                                                         
-                # Draw rectangle and label only for the most important hazard type
-                cv2.rectangle(hazard_image_with_box, (xmin, ymin), ( xmax, ymax), (0,255,0), 3)
-                cv2.putText(hazard_image_with_box, f"{label}:{score}", (xmin+2, ymin-5), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0,255,0), 2)
+                xmin, ymin, xmax, ymax = map(int, box.cpu().numpy())
+                if len(label) > 0 :                                        
+                    # Draw rectangle and label only for the most important hazard type
+                    cv2.rectangle(hazard_image_with_box, (xmin, ymin), (xmax, ymax), (0,255,0), 3)
+                    cv2.putText(hazard_image_with_box, f"{label}:{score:.2f}", (xmin+2, ymin-5), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0,255,0), 2)
 
     return segmented_results_text, response, cv2.cvtColor(hazard_image_with_box, cv2.COLOR_BGR2RGB), hazard_info
 
 # Gradio Interface
 prompt_templates = {
     "Default": """You are an AI assistant describing scenes from video to a disabled person with wheelchair moving forward. With all the context including in these consecutive SEGEMENTS, Detected Speech and Visual description is more important than Detected Sounds.
-Firstly, please describe what is the hazard scene to move forward, and then to avoid risk for the disabled person with wheelchair, please predict abd advice the NextAction.
+Firstly, please describe what is hazard to move forward, and then to avoid risk for the disabled person with wheelchair, what is the Next Action to do.
 The FORMAT of the output MUST be:
 {
   "Description": "A detailed description of the scene, including actions, objects, and people.",
