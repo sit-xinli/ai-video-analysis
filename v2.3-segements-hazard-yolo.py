@@ -335,15 +335,12 @@ def main_process(video_path, init_prompt, language, segments_of_video, frames_pe
 
 # Gradio Interface
 prompt_templates = {
-    "Default": """You are an AI assistant describing scenes from video to a disabled person with wheelchair.
-With all the context including in these consecutive SEGEMENTS, Detected Speech and Visual description is more important than Detected Sounds.
-Firstly describe what is happening in the scene, then in order to avoid risk for the disabled person with wheelchair, please advice the NEXT ACTION.
-
-the format of the output MUST be:
+    "Default": """You are an AI assistant describing scenes from video to a disabled person with wheelchair moving forward. With all the context including in these consecutive SEGEMENTS, Detected Speech and Visual description is more important than Detected Sounds.
+Firstly, please describe what is hazard to move forward, and then to avoid risk for the disabled person with wheelchair, what is the Next Action to do.
+The FORMAT of the output MUST be:
 {
   "Description": "A detailed description of the hazard scene, including actions, objects and relations.",
   "NextAction": "Go forward | Turn left | Turn right | Stop | Go backward | Wait | Look around | Run away | Navigate to location | Avoid obstacle | Adjust speed | Follow person | Return to charger | Emergency stop | Open door | Call elevator | Adjust seat | Send alert | Share location | Request help | Voice command mode | Daily schedule | Entertainment mode"
-
 }""",
     "Default(日本語)": """あなたはAIアシスタントで、車椅子に乗った障害者にビデオのシーンを説明します。
 これらの連続したSEGEMENTSに含まれるすべてのコンテキストでは、検出された音声よりも、検出された音声と視覚的な説明の方が重要です。
