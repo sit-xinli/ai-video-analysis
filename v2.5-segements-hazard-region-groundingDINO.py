@@ -59,8 +59,7 @@ def get_rotation(video_path):
 def profile_video(video_path):
 
     rotation = get_rotation(video_path)
-    print(f"^^^^^^^^^^^^^^^^^^^^^^^Rotation: {rotation} degrees ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^")
-
+    
     cap = cv2.VideoCapture(video_path)    
     width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
@@ -424,13 +423,13 @@ def main_process(video_path, init_prompt, language, segments_of_video, frames_pe
             hazard_image_with_box = img.copy() #keep BGR order for cv2 drawing
             
 
-            bounding_boxes = grounding_dino(cv2.cvtColor(hazard_image_with_box, cv2.COLOR_BGR2RGB), most_important_hazard_type)
+            bounding_boxes = grounding_dino(cv2.cvtColor(img, cv2.COLOR_BGR2RGB), most_important_hazard_type)
             for score, label, box in zip(bounding_boxes["scores"], bounding_boxes["labels"], bounding_boxes["boxes"]):
                 xmin, ymin, xmax, ymax = map(int, box.cpu().numpy())
                 if len(label) > 0 :                                        
                     # Draw rectangle and label only for the most important hazard type
                     cv2.rectangle(hazard_image_with_box, (xmin, ymin), (xmax, ymax), (0,255,0), 3)
-                    cv2.putText(hazard_image_with_box, f"{label}:{score:.2f}", (xmin+2, ymin-5), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0,255,0), 2)
+                    #cv2.putText(hazard_image_with_box, f"{label}:{score:.2f}", (xmin+2, ymin-5), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0,255,0), 2)
 
     return segmented_results_text, response, cv2.cvtColor(hazard_image_with_box, cv2.COLOR_BGR2RGB), hazard_info
 
@@ -481,7 +480,9 @@ with gr.Blocks() as demo:
         with gr.Column(scale=1):
             gr.Markdown("## Video Input")
             gr.Markdown("Upload a video and provide a prompt to analyze the scene. The AI will provide a description and suggest the next action.")
-            video_input = gr.Video(label="Input Video", sources=["upload", "webcam"])
+            video_input = gr.Video(label = "Input Video", 
+                                   sources = ["upload", "webcam"],
+                                   )
 
             with gr.Accordion("Parameters", open=False):
                 language_input = gr.Dropdown(
@@ -545,4 +546,4 @@ with gr.Blocks() as demo:
     )
 
 if __name__ == "__main__":
-    demo.launch()
+    demo.launch(server_port=8080)
