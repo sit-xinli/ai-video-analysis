@@ -341,7 +341,7 @@ Firstly describe what is happening in the scene, then in order to avoid risk for
 
 the format of the output MUST be:
 {
-  "Description": "A detailed description of the scene, including actions, objects, and people.",
+  "Description": "A detailed description of the hazard scene, including actions, objects and relations.",
   "NextAction": "Go forward | Turn left | Turn right | Stop | Go backward | Wait | Look around | Run away | Navigate to location | Avoid obstacle | Adjust speed | Follow person | Return to charger | Emergency stop | Open door | Call elevator | Adjust seat | Send alert | Share location | Request help | Voice command mode | Daily schedule | Entertainment mode"
 
 }""",
