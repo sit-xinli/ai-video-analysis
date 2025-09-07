@@ -116,10 +116,28 @@ def has_speech(mp3_path, aggressiveness=2, min_speech_frames=5):
 # Transcribe speech
 def speech_branch(audio_chunk, language="en"):
     result = "no speech detected"
-    prompt = """You are an AI assistant transcribing audio for a disabled person with wheelchair. 
-    Please automatically determine the language and transcribe the audio accurately and clearly, 
-    paying attention to any important details or context that may be relevant to the disabled person.
-    If the audio is not clear or contains no speech, return a message "no speech" indicating that no speech was detected."""
+    prompt = """ 
+You are an AI assistant that **transcribes audio for a person who uses a wheelchair**.
+
+Your tasks are:
+
+1. **Automatically detect the spoken language** in the provided audio.
+2. **Transcribe the speech accurately and clearly** into text, preserving the meaning and important details relevant to the user.
+3. If the audio is **unclear, contains only noise, or no speech is detected**, return the exact string:
+
+   ```
+   no speech
+   ```
+
+### **Output Format (strict JSON):**
+
+```json
+{
+  "Language": "<detected language code or name, e.g., 'English' or 'Japanese'>",
+  "Transcription": "<transcribed speech text OR 'no speech'>"
+}
+```
+"""
 
     with tempfile.NamedTemporaryFile(suffix=".mp3", delete=True) as tmp:
         audio_chunk.export(tmp.name, format="mp3")
@@ -231,25 +249,31 @@ def visual_branch(frames, speech, evts):
             model="gpt-4.1-nano",
             messages=[
                 {"role": "system", 
-                 "content": """You are an AI assistant describing scenes from video to a disabled person with wheelchair moving forward.
-                  Your task is to analyze the provided images to identify forward direction and identify hazard objects for moving forward.
-                  The hazard objects can be anything that may cause harm or risk to the disabled person with wheelchair,
-                  The typical hazard include curbs, steps, uneven road surface, obstacles, dangerous objects, or unsafe conditions.
-                  
-                  First, describe the hazard scene to a disabled person with wheelchair moving forward.
-                  Then, provide the exact bounding box coordinates for the identified hazard object in the most hazard image.
-                  The coordinates should be normalized from 0.0 to 1.0 for x, y, width, and height, relative to the image dimensions.
-                  The output format MUST be a JSON object with the following structure:
-                  {
-                    "Description": "A detailed description of the hazard scene, including actions, objects, and people, and the primary hazard.",
-                    "HazardRegion": {
-                        "index": <index of the most representative image>,
-                        "score": <confidence score of the hazard region>,
-                        "caption": "<caption for the detected hazard object>",
-                        "box": [x, y, width, height]
-                    }
-                  }
-                  """
+                 "content": """
+                  You are an AI assistant that analyzes video frames for a person using a wheelchair.
+Your task is to:
+
+1. **Identify hazards** in the provided images. A hazard is anything that could cause risk or difficulty for a wheelchair user (e.g., curbs, steps, stairs, uneven road surfaces, holes, obstacles, clutter, dangerous objects, moving vehicles, slippery areas, or blocked paths).
+2. **Describe the scene** with a clear and detailed explanation of the environment, including relevant people, objects, actions, and the main hazard.
+3. **Provide bounding box coordinates** for the most hazardous object(s) in the most relevant image. Use normalized values between `0.0` and `1.0` for `[x, y, width, height]`, where `(x, y)` is the top-left corner of the bounding box relative to the image dimensions.
+4. If multiple hazards are present, include them as separate entries in the `HazardRegion` list, ordered by severity or immediacy of risk.
+
+### **Output Format (strict JSON):**
+
+```json
+{
+  "Description": "A detailed description of the scene, focusing on hazards relevant to a wheelchair user. Mention objects, people, actions, and the primary hazard clearly.",
+  "HazardRegion": [
+    {
+      "index": <integer index of the image where the hazard is most visible>,
+      "score": <float between 0.0 and 1.0 indicating confidence>,
+      "caption": "Short caption describing the hazard object or condition",
+      "box": [x, y, width, height]
+    }
+  ]
+}
+```
+"""
                 },
                 {"role": "user", "content": content}
             ],
@@ -412,13 +436,24 @@ def main_process(video_path, init_prompt, language, segments_of_video, frames_pe
 
 # Gradio Interface
 prompt_templates = {
-    "Default": """You are an AI assistant describing scenes from video to a disabled person with wheelchair moving forward. With all the context including in these consecutive SEGEMENTS, Detected Speech and Visual description is more important than Detected Sounds.
-Firstly, please describe what is hazard to move forward, and then to avoid risk for the disabled person with wheelchair, what is the Next Action to do.
-The FORMAT of the output MUST be:
+    "Default": """
+You are an AI assistant that describes video scenes to a person who uses a wheelchair.
+Use all provided context from the consecutive **SEGMENTS**.
+When generating the output:
+
+* Prioritize **Detected Speech** and **Visual Descriptions** over other sounds.
+* First, give a **detailed description** of what is happening in the scene (including people’s actions, objects, environment, and spatial relations).
+* Then, to ensure the safety and convenience of the wheelchair user, recommend the most appropriate **NextAction**.
+
+The output **must strictly follow** this JSON format (no extra text outside the JSON):
+
+```json
 {
-  "Description": "A detailed description of the scene, including actions, objects, and people.",
-  "NextAction": "Go forward | Turn left | Turn right | Stop | Go backward | Wait | Look around | Run away | Navigate to location | Avoid obstacle | Adjust speed | Follow person | Return to charger | Emergency stop | Open door | Call elevator | Adjust seat | Send alert | Share location | Request help | Voice command mode | Daily schedule | Entertainment mode"
-}""",
+  "Description": "A detailed description of the hazard, including actions, objects, and relations.",
+  "NextAction": "Go forward | Turn left | Turn right | Stop | Go backward | Wait | Look around | Run away | Navigate to location | Avoid obstacle | Adjust speed | Follow person | Return to charger | Emergency stop | Open door | Call elevator | Request help | Daily schedule"
+}
+```
+""",
     "Default(日本語)": """あなたはAIアシスタントで、車椅子に乗った障害者にビデオのシーンを説明します。
 これらの連続したSEGEMENTSに含まれるすべてのコンテキストでは、検出された音声よりも、検出された音声と視覚的な説明の方が重要です。
 まず、そのシーンで何が起こっているかを日本語で説明し、次に障害者の危険を回避するために、次のアクションをアドバイスしてください。
