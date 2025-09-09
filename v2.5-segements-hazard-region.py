@@ -11,8 +11,10 @@ import numpy as np
 import tempfile
 from moviepy import VideoFileClip
 from transformers import (
-    AutoProcessor, AutoModelForAudioClassification,AutoModelForZeroShotObjectDetection
+    AutoProcessor, AutoModelForAudioClassification,
+    Owlv2Processor, Owlv2ForObjectDetection  # works for OWLv2 & OWL-ViT
 )
+
 import webrtcvad
 import os
 import dotenv
@@ -39,12 +41,14 @@ audio_model.eval()
 
 # GroundingDINO
 # Set device to GPU if available
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-model_id = "IDEA-Research/grounding-dino-base"
+DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+#model_id = "IDEA-Research/grounding-dino-base"
+model_id = "google/owlv2-base-patch16-ensemble"    # OWLv2 (recommended: better grounding)
 # Load the pretrained DETR model and processor
-zeroshot_processor = AutoProcessor.from_pretrained(model_id)
-zeroshot_model = AutoModelForZeroShotObjectDetection.from_pretrained(model_id).to(device)
-
+#zeroshot_processor = AutoProcessor.from_pretrained(model_id)
+#zeroshot_model = AutoModelForZeroShotObjectDetection.from_pretrained(model_id).to(DEVICE)
+owlv2_processor = Owlv2Processor.from_pretrained(model_id)
+owlv2_model = Owlv2ForObjectDetection.from_pretrained(model_id).to(DEVICE).eval()
 
 #get rotation for video
 def get_rotation(video_path):
@@ -245,14 +249,14 @@ def visual_branch(frames, speech, evts):
             })
     
     response = client_openai.chat.completions.create(
-            model="gpt-4.1-nano",
+            model="gpt-5-nano",
             messages=[
                 {"role": "system", 
                  "content": """
-                  You are an AI assistant that analyzes video frames for a person using a wheelchair.
+You are an AI assistant that analyzes video frames to detect and track a person using a wheelchair moving along a roadside.
 Your task is to:
 
-1. **Identify hazards** in the provided images. A hazard is anything that could cause risk or difficulty for a wheelchair user (e.g., curbs, steps, stairs, uneven road surfaces, holes, obstacles, clutter, dangerous objects, moving vehicles, slippery areas, or blocked paths).
+1. **Identify hazards** in the provided images. A hazard is anything that could cause risk or difficulty for a wheelchair user (e.g., cars, curbs, steps, stairs, uneven road surfaces, holes, obstacles, clutter, dangerous objects, trucks or other vehicles, slippery areas, or blocked paths).
 2. **Describe the scene** with a clear and detailed explanation of the environment, including relevant people, objects, actions, and the main hazard.
 3. **Provide bounding box coordinates** for the most hazardous object(s) in the most relevant image. Use normalized values between `0.0` and `1.0` for `[x, y, width, height]`, where `(x, y)` is the top-left corner of the bounding box relative to the image dimensions.
 4. If multiple hazards are present, include them as separate entries in the `HazardRegion` list, ordered by severity or immediacy of risk.
@@ -266,7 +270,7 @@ Your task is to:
     {
       "index": <integer index of the image where the hazard is most visible>,
       "score": <float between 0.0 and 1.0 indicating confidence>,
-      "caption": "Short caption describing the hazard object or condition",
+      "caption": "Short caption describing the hazard object or condition, keep it within 10 words to be conveniently used in CLIP or GroundingDINO algorithm.",
       "box": [x, y, width, height]
     }
   ]
@@ -276,18 +280,19 @@ Your task is to:
                 },
                 {"role": "user", "content": content}
             ],
-            max_tokens=1000
+            #max_completion_tokens=1000
         )
+    print(f"Visual analysis response:\n{response}\n")
     return response.choices[0].message.content
 
 # generate scene description using GPT
 def generate_scene_description(prompt):
     
     response = client_openai.chat.completions.create(
-        model="gpt-4.1-nano",
+        model="gpt-5-nano",
         messages=[{"role": "user", "content": prompt}],
-        temperature=0.7,
-        max_tokens=1000,
+        #temperature=0.7,
+        #max_completion_tokens=1000,
         
     )
     return response.choices[0].message.content.strip()
@@ -299,11 +304,11 @@ if (original_width > original_height and width < height ) or (original_width < o
   oratate image 90 or 270
 
 """
-def grounding_dino(image, caption):
+def owlvit_detect(image, phases, score_thresh=0.1):
     """
     Detect objects in the image using GroundingDINO API.
     Returns a list of detected objects with their bounding boxes and confidence scores.
-    
+
     the format of the response is expected to be a JSON string with bounding boxes
     [
         scores:[], 
@@ -311,27 +316,19 @@ def grounding_dino(image, caption):
         boxes:[]
     ]
     """
-    
     # Preprocess the image
-    inputs = zeroshot_processor(images=image, text=caption, return_tensors="pt").to(device)
+    inputs = owlv2_processor(images=image, text=phases, return_tensors="pt").to(DEVICE)
 
     # Forward pass
     with torch.no_grad():
-        outputs = zeroshot_model(**inputs)
+      outputs = owlv2_model(**inputs)
 
-    scores = outputs.logits.softmax(-1)[..., :-1].max(-1).values
-    threshold = scores.quantile(0.2)  # Keep top 80% confident predictions
+    # Post-process the results (keep only high-confidence predictions)
+    target_sizes = torch.tensor([image.size[::-1]])  # (height, width)
+    objects = owlv2_processor.post_process_grounded_object_detection(outputs,target_sizes=target_sizes,threshold=score_thresh)
 
-    # Post-process the results (keep only high-confidence predictions) 
-    if hasattr(image, "shape"):
-        height, width = image.shape[:2]
-        target_sizes = torch.tensor([[height, width]])
-    elif hasattr(image, "size"):  #if have shape, the size if the whole size of image (channel*w*h)
-        target_sizes = torch.tensor([image.size[::-1]])  # (height, width)
-        
-    
-    results = zeroshot_processor.post_process_grounded_object_detection(outputs, target_sizes=target_sizes, box_threshold=threshold, text_threshold=0.3)[0]
-    
+    results = objects[0]  # Retrieve predictions for the first image for the corresponding text queries
+  
     return results
 
 # Full video analysis pipeline
@@ -383,6 +380,43 @@ def analyze_video(video_path,  segments_of_video, frames_per_segment=5, language
     
     return results, all_frames, rotation
 
+
+# helpers
+def decode_base64_frame_to_bgr(b64_str: str) -> np.ndarray:
+    """Decode a base64-encoded image (as stored in all_frames) to a BGR OpenCV image."""
+    img_data = base64.b64decode(b64_str)
+    np_arr = np.frombuffer(img_data, dtype=np.uint8)
+    img = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)  # BGR
+    return img
+
+def pil_from_bgr(img_bgr: np.ndarray) -> Image.Image:
+    """Convert BGR (cv2) image to PIL RGB."""
+    return Image.fromarray(cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB))
+
+def draw_topk_detections_bgr(img_bgr: np.ndarray, detections: list, phrases, hazard_info, topk: int = 1) -> np.ndarray:
+    """Draw top-k detections (sorted by score) onto a BGR image."""
+    if not isinstance(img_bgr, np.ndarray):
+        raise ValueError("draw_topk_detections_bgr: img_bgr must be a numpy array (BGR).")
+    if not detections:
+        return img_bgr
+
+    out = img_bgr.copy()
+    # スコアの高い順にインデックスを取得
+    top_indices = detections["scores"].topk(topk).indices
+    for idx in reversed(top_indices):
+        score = detections["scores"][idx].item()
+        label = detections["labels"][idx]
+        box = detections["boxes"][idx].cpu().numpy()  # [x1, y1, x2, y2]
+        x1, y1, x2, y2 = map(int, box)
+        hazard_info['box'] = [x1, y1, x2 - x1, y2 - y1]  # update box in hazard_info
+        
+        cv2.rectangle(out, (x1, y1), (x2, y2), (0, 255, 0), thickness=3)
+        #cv2.putText(out, f"{label}:{score:.2f}", (x1 + 2, max(0, y1 - 6)),
+        #            cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2, lineType=cv2.LINE_AA)
+        print(f"Detected {phrases[label]} with confidence {score:.2f} at box {box}")
+    return out
+    
+
 def main_process(video_path, init_prompt, language, segments_of_video, frames_per_segment):
     results, all_frames, rotation = analyze_video(video_path, int(segments_of_video), int(frames_per_segment), language)
     
@@ -391,6 +425,13 @@ def main_process(video_path, init_prompt, language, segments_of_video, frames_pe
     most_important_hazard_region = None
     hazard_segment_index = -1
 
+    # Safely initialize a fallback image (decode first frame of first segment)
+    try:
+        fallback_bgr = decode_base64_frame_to_bgr(all_frames[0][0])
+    except Exception:
+        fallback_bgr = np.zeros((480, 640, 3), dtype=np.uint8)  # black fallback if decoding fails
+    hazard_image_with_box = fallback_bgr  # always a BGR np.ndarray
+
     for i, (segment_index, transcript, events, visual_message) in enumerate(results):
         segmented_results_text += f"--- SEGMENT {segment_index} ---\n"
         segmented_results_text += f"Detected Speech: {transcript}\n"
@@ -398,50 +439,58 @@ def main_process(video_path, init_prompt, language, segments_of_video, frames_pe
         visual_description = visual_message.get("Description", "N/A")
         segmented_results_text += f"Visual Description: {visual_description}\n\n"
 
-        hazard_region = visual_message.get("HazardRegion", None)            
-        if hazard_region and (most_important_hazard_region is None or hazard_region.get("score", 0) > most_important_hazard_region.get("score", 0)):
+        hazard_region = visual_message.get("HazardRegion", None)[0] # the first hazard region only           
+        if hazard_region and (most_important_hazard_region is None or 
+                              hazard_region.get("score", 0) > most_important_hazard_region.get("score", 0)):
             most_important_hazard_region = hazard_region
             hazard_segment_index = i
                     
     content_prompt = init_prompt + "\n\n" + segmented_results_text
+    print(f"multimodel prompt = \n{ content_prompt } \n")
+
     response = generate_scene_description(content_prompt)
 
     hazard_info = "No hazard detected."
-    hazard_image_with_box = all_frames[0][0]
+    
     if most_important_hazard_region and hazard_segment_index != -1:
-        hazard_info = f"{most_important_hazard_region}"
+        hazard_info = most_important_hazard_region
+
+        # decode the referenced frame
         frame_index = most_important_hazard_region.get("index", 0)
-        if frame_index < len(all_frames[hazard_segment_index]):
+        if 0 <= hazard_segment_index < len(all_frames) and 0 <= frame_index < len(all_frames[hazard_segment_index]):
             base64_frame = all_frames[hazard_segment_index][frame_index]
-            #old_width, old_height = all_frame_dims[hazard_segment_index][frame_index]
+            img_bgr = decode_base64_frame_to_bgr(base64_frame)  # BGR image for drawing
+        else:
+            img_bgr = fallback_bgr
             
-            img_data = base64.b64decode(base64_frame)
-            np_arr = np.frombuffer(img_data, np.uint8) #Creates a 1D NumPy array from the raw bytes buffer.
-            #convert from a NumPy array back into an actual image matrix that OpenCV can work with,kept as BGR format 
-            img = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
-            most_important_hazard_type = most_important_hazard_region.get("caption", "Hazard")
-            hazard_image_with_box = img.copy() #keep BGR order for cv2 drawing
-            
+        # Prepare OWL-ViT query list
+        most_important_hazard_caption = most_important_hazard_region.get("caption", "hazard")
+        # If your owlvit_detect expects multiple phrases, pass [caption]; if you also want context, add more phrases
+        phrases = [most_important_hazard_caption]
 
-            bounding_boxes = grounding_dino(cv2.cvtColor(img, cv2.COLOR_BGR2RGB), most_important_hazard_type)
-            for score, label, box in zip(bounding_boxes["scores"], bounding_boxes["labels"], bounding_boxes["boxes"]):
-                xmin, ymin, xmax, ymax = map(int, box.cpu().numpy())
-                if len(label) > 0 :                                        
-                    # Draw rectangle and label only for the most important hazard type
-                    cv2.rectangle(hazard_image_with_box, (xmin, ymin), (xmax, ymax), (0,255,0), 3)
-                    #cv2.putText(hazard_image_with_box, f"{label}:{score:.2f}", (xmin+2, ymin-5), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0,255,0), 2)
+        # Run OWL-ViT (expects PIL RGB)
+        pil_img = pil_from_bgr(img_bgr)
+        detections = owlvit_detect(pil_img, phrases, score_thresh=0.1)  # returns list[dict]
 
+        # Draw top-k detections (only the hazard caption)
+        # If owlvit_detect can return other labels, you can filter: [d for d in detections if d["label"] == most_important_hazard_caption]
+        hazard_image_with_box = draw_topk_detections_bgr(img_bgr, detections, phrases, hazard_info)
+    else:
+        hazard_image_with_box = fallback_bgr
+
+    print(f"Most important hazard region: {hazard_info}")
     return segmented_results_text, response, cv2.cvtColor(hazard_image_with_box, cv2.COLOR_BGR2RGB), hazard_info
+    #return segmented_results_text, response, hazard_image_with_box, hazard_info
 
 # Gradio Interface
 prompt_templates = {
     "Default": """
-You are an AI assistant that describes video scenes to a person who uses a wheelchair.
+You are an AI assistant that analyzes video frames to detect and track a person using a wheelchair moving along a roadside.
 Use all provided context from the consecutive **SEGMENTS**.
 When generating the output:
 
 * Prioritize **Detected Speech** and **Visual Descriptions** over other sounds.
-* First, give a **detailed description** of what is happening in the scene (including people’s actions, objects, environment, and spatial relations).
+* First, give a **detailed description** of what is happening in the scene (including people’s actions, cars or other objects, environment, and spatial relations).
 * Then, to ensure the safety and convenience of the wheelchair user, recommend the most appropriate **NextAction**.
 
 The output **must strictly follow** this JSON format (no extra text outside the JSON):
@@ -527,7 +576,7 @@ with gr.Blocks() as demo:
 
         with gr.Column(scale=1):
             gr.Markdown("## Analysis Results")
-            gr.Markdown("The most impportant hazard scene and its hazard region shown. The description hazard scene and nex action for a wheelchair user is recommended.")
+            gr.Markdown("The most important hazard scene and its hazard region shown. The description hazard scene and nex action for a wheelchair user is recommended.")
             image_output = gr.Image(label="Hazard Region")
             hazard_info_output = gr.Textbox(label="Hazard Details")
             final_response_output = gr.Textbox(label="Final Response")
